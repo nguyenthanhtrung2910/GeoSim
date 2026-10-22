@@ -1,0 +1,3 @@
+[submodule "Plugins/LandscapeCombinator"]
+	path = Plugins/LandscapeCombinator
+	url = https://github.com/LandscapeCombinator/LandscapeCombinator.git
