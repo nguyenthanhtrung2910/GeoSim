@@ -14,7 +14,7 @@
 #include "Delegates/Delegate.h"
 #include "Landscape.h"
 
-#include "MapDowloader.generated.h"
+#include "MapDownloader.generated.h"
 
 #define LOCTEXT_NAMESPACE "FLandscapeGenerationModule"
 
@@ -57,12 +57,12 @@ enum class ELandscapeImageSourceKind : uint8
 };
 
 UCLASS()
-class LANDSCAPEGENERATION_API UMapDowloader : public UActorComponent
+class LANDSCAPEGENERATION_API UMapDownloader : public UActorComponent
 {
 	GENERATED_BODY()
 
 public:
-	UMapDowloader();
+	UMapDownloader();
 
 	bool ConfigureForTiles(int Zoom, int MinX, int MaxX, int MinY, int MaxY);
 
@@ -278,7 +278,7 @@ public:
 			EditConditionHides, DisplayPriority = "8"
 		)
 	)
-	// This should not (almost never) be modified manually, as the WMS server may not supported
+	// This should not (almost never) be modified manually, as the WMS server may not be supported
 	// the given CRS. There are rare cases where the parsed CRS is not correct, and in that
 	// case the CRS can be edited to the correct value (as found in the WMS server capabilities).
 	FString WMS_CRS = "";
@@ -757,7 +757,7 @@ public:
 		EditAnywhere, BlueprintReadWrite, Category = "Resolution",
 		meta = (EditCondition = "bScaleResolution", EditConditionHides, DisplayPriority = "21")
 	)
-	/* When different than 100%, your heightmap resolution will be scaled up or down using GDAL. */
+	/* When different from 100%, your heightmap resolution will be scaled up or down using GDAL. */
 	int PrecisionPercent = 100;
 
 
@@ -847,9 +847,9 @@ public:
 #endif
 	
 	HMFetcher* CreateFetcher(
-		bool bIsUserInitiated, FString Name, bool bEnsureOneBand, bool bScaleAltitude,
+		bool bIsUserInitiated, const FString& Name, bool bEnsureOneBand, bool bScaleAltitude,
 		bool bConvertToPNG, bool bConvertFirstOnly, bool bAddMissingTiles,
-		TFunction<bool(HMFetcher*)> RunBeforePNG, TObjectPtr<UGlobalCoordinates> GlobalCoordinates
+		const TFunction<bool(HMFetcher*)>& RunBeforePNG, TObjectPtr<UGlobalCoordinates> GlobalCoordinates
 	);
 
 	UFUNCTION()
@@ -862,47 +862,47 @@ public:
 	static bool HasNextZenToken();
 
 	UFUNCTION()
-	bool IsWms();
+	bool IsWms() const;
 
 	UFUNCTION()
 	bool ManualParametersSelection() const { return ParametersSelection.ParametersSelectionMethod == EParametersSelectionMethod::Manual; }
 
 	UFUNCTION()
-	bool IsXYZ();
+	bool IsXYZ() const;
 
 	UFUNCTION()
-	bool AllowsParametersSelection();
+	bool AllowsParametersSelection() const;
 
 	UFUNCTION()
-	bool CanAutoSetResolution();
+	bool CanAutoSetResolution() const;
 
 	UFUNCTION()
 	void AutoSetResolution();
 
 	UFUNCTION()
-	bool IsMapbox();
+	bool IsMapbox() const;
 
 	UFUNCTION()
-	bool IsMapTiler();
+	bool IsMapTiler() const;
 
 	UFUNCTION()
-	bool IsNextZen();
+	bool IsNextZen() const;
 
 	UFUNCTION()
 	bool IsWorldElevation3D() const;
 
 protected:
 	void OnLayerChanged();
-	void OnImageSourceChanged(TFunction<void(bool)> OnComplete);
-	void ResetWmsProvider(TArray<FString> ExcludeCRS, TFunction<bool(FString)> LayerFilter, TFunction<void(bool)> OnComplete);
+	void OnImageSourceChanged(const TFunction<void(bool)>& OnComplete);
+	void ResetWmsProvider(const TArray<FString>& ExcludeCrs, const TFunction<bool(FString)>& LayerFilter, TFunction<void(bool)> OnComplete);
 	
 	HMFetcher* CreateInitialFetcher(bool bIsUserInitiated, FString Name);
 
 	UFUNCTION()
-	bool HasMultipleLayers();
+	bool HasMultipleLayers() const;
 	
-	FString GetMapboxToken();
-	FString GetMapTilerToken();
+	FString GetMapboxToken() const;
+	FString GetMapTilerToken() const;
 	FString GetNextZenToken();
 
 	static bool ShowMapboxFreeTierWarning();

@@ -12,6 +12,26 @@ class ALandscape;
 class ALandscapeSplineActor;
 struct FImportedRoadWay;
 
+namespace RoadGeneratorInternal
+{
+	struct FImportSpan
+	{
+		int64 WayId = 0;
+		TArray<int64> SourceWayIds;
+		FName Highway;
+		/** Zero means retain the selected highway style's driving lanes. */
+		int32 LaneCount = 0;
+		TArray<FVector> Positions;
+		FString StartKey;
+		FString EndKey;
+	};
+
+	TArray<FImportSpan> PrepareSpans(const TArray<FImportedRoadWay>& Ways, const TArray<FName>& Filter, bool bRequireTerrain, double HeightOffset, double MergeDistance = 1000.0);
+	/** Always copies the base style; absent/invalid lane counts preserve its layout. */
+	URoadStyle* CreateLaneCountStyle(UObject* Outer, const URoadStyle* Source, int32 LaneCount);
+	int32 MergeStraightSpans(TArray<FImportSpan>& Spans, double AngleTolerance, const TFunctionRef<URoadStyle*(const FImportSpan&)>& ResolveStyle);
+}
+
 /** Converts the OSMRoadImporter road cache into Road Constructor roads. */
 UCLASS()
 class ROADGENERATION_API ARoadGenerator : public AActor, public ILCGenerator
@@ -21,21 +41,21 @@ public:
 	ARoadGenerator();
 
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Road Constructor|Import")
-	TObjectPtr<AOsmRoadImporter> OSMRoadImporter;
+	TObjectPtr<AOsmRoadImporter> OsmRoadImporter;
 
-	/** Includes lane widths, materials, sidewalk profiles, curbs and props. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor|Styles")
+	/** Base for ways without a Highway Styles entry; each way gets a copy with tag overrides. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor|Highway")
 	TObjectPtr<URoadStyle> DefaultRoadStyle;
 
-	/** Optional overrides keyed by the OSM highway value, for example residential or primary. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor|Styles")
+	/** Base styles keyed by OSM highway value, e.g. residential or primary. Empty entries use Default Road Style. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor|Highway")
 	TMap<FName, TObjectPtr<URoadStyle>> HighwayStyles;
 
-	/** Allowed OSM highway values. Clear the list to include all drivable classes; footpaths and areas remain excluded. */
+	/** Only these OSM highway values are selected. Empty includes every highway value; no other tags exclude ways. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor|Import")
 	TArray<FName> HighwayFilter;
 
-	/** Additional road-to-Landscape gap applied to Road Constructor's default roadbed height offset. */
+	/** Road mesh elevation relative to cached imported points. Negative values place roads below those points. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor|Placement", meta = (Units = "cm"))
 	double SurfaceOffsetCm = 3.0;
 
@@ -54,13 +74,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor|Shape", meta = (ClampMin = "0", Units = "cm"))
 	double JunctionMergeDistanceCm = 1000.0;
 
-	/** Maximum deviation from 180 degrees between outward XY directions. 90-degree corners remain junctions. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor|Shape", meta = (ClampMin = "0", ClampMax = "45", Units = "deg", EditCondition = "bMergeStraightRoads"))
-	double StraightConnectionToleranceDegrees = 10.0;
-	
 	/** Join compatible two-arm straight continuations before spawning Road Constructor actors. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor|Shape")
 	bool bMergeStraightRoads = true;
+
+	/** Maximum deviation from 180 degrees between outward XY directions. 90-degree corners remain junctions. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor|Shape", meta = (ClampMin = "0", ClampMax = "45", Units = "deg", EditCondition = "bMergeStraightRoads"))
+	double StraightConnectionToleranceDegrees = 10.0;
 
 	/** Solve junctions, remove ordinary controls inside their cut ranges, then solve again. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor|Shape")
@@ -77,18 +97,18 @@ public:
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Road Constructor Terrain")
 	TObjectPtr<ALandscape> TargetLandscape;
 
-	/** Create Road Constructor's Landscape spline deformation after building the roads. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor Terrain")
-	bool bGenerateLandscapeSplinesWithRoads = false;
-
-	/** Enable Road Constructor's persistent Landscape spline deformation. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor Terrain")
-	bool bDeformLandscape = true;
-
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor Terrain")
 	bool bCreateSplineLayerIfMissing = true;
 
-	/** Relative to cached elevations; road controls use this height plus Surface Offset Cm. */
+	/** Blend distance beyond each side of the Landscape spline corridor. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor Terrain", meta = (ClampMin = "0", Units = "cm"))
+	double LandscapeSplineSideFalloffCm = 700.0;
+
+	/** Blend distance beyond the first and last Landscape spline points. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor Terrain", meta = (ClampMin = "0", Units = "cm"))
+	double LandscapeSplineEndFalloffCm = 2000.0;
+
+	/** Landscape spline elevation relative to cached imported points, independent of Surface Offset Cm. Negative values lower the splines. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor Terrain", meta = (Units = "cm"))
 	double LandscapeHeightOffsetCm = 0.0;
 
@@ -98,10 +118,11 @@ public:
 	UFUNCTION(CallInEditor, Category = "Road Constructor")
 	void ClearRoads();
 
-	/** Apply Road Constructor's Terrain Deform to the already generated roads. */
+	/** Replace this generator's Landscape deformation splines using its currently generated roads. */
 	UFUNCTION(CallInEditor, Category = "Road Constructor Terrain")
 	void GenerateLandscapeSplines();
 
+	/** Remove only this generator's Landscape splines and their deformation, preserving roads. */
 	UFUNCTION(CallInEditor, Category = "Road Constructor Terrain")
 	void ClearLandscapeSplines();
 
@@ -117,11 +138,25 @@ public:
 	TSoftObjectPtr<ALandscapeSplineActor> GeneratedLandscapeSplineActor;
 
 private:
+	friend class FRoadGeneratorLandscapeRegenerationTest;
+	friend class FRoadGeneratorWayStylesTest;
+	friend class FRoadGeneratorChangeDetectionTest;
+
 	bool bGenerationInProgress = false;
-	bool bLandscapeSplinesOnly = false;
 	UPROPERTY()
 	TSoftObjectPtr<ALandscape> GeneratedSplineLandscape;
-	void StartGeneration(bool bOnlyLandscapeSplines);
+	/** Persist spline ownership independently of the road actors that supplied their geometry. */
+	UPROPERTY()
+	TSet<FString> GeneratedSplinePrefixes;
+	// Session-local fingerprints: only successful generation records a reusable baseline.
+	FString CachedRoadInputs;
+	FString CachedRoadOutput;
+	FString CachedSplineInputs;
+	FString CachedSplineOutput;
+	void RememberLandscapeSplineOwnership();
+	bool GenerateLandscapeSplinesInternal();
+	bool ClearLandscapeSplinesInternal();
 	bool BuildRoads(const TArray<FImportedRoadWay>& Ways, FName OutputFolderPath);
-	bool BuildLandscapeSplines(AOsmRoadScene* Scene);
+	bool EnsureLandscapeSplineLayer() const;
+	bool BuildLandscapeSplines(AOsmRoadScene* Scene) const;
 };

@@ -44,6 +44,14 @@ class ROADGENERATION_API AOsmRoadScene : public ARoadScene
 {
 	GENERATED_BODY()
 public:
+	/** Export per-way styles with this scene, even when referencing roads are external actors. */
+	UPROPERTY(Instanced)
+	TMap<int64, TObjectPtr<URoadStyle>> ImportedWayStyles;
+
+	/** Mesh elevation offset used when generating this scene's imported positions. */
+	UPROPERTY()
+	double ImportedSurfaceOffsetCm = 0.0;
+
 	UPROPERTY()
 	bool bOverrideJunctionRadius = false;
 
@@ -58,7 +66,7 @@ public:
 	bool bRemoveCornersWithoutJunctionSurface = true;
 
 	bool BuildImportedNetwork();
-	int32 RemoveCornersWithoutJunctionSurface(AJunctionActor* Junction);
+	int32 RemoveCornersWithoutJunctionSurface(AJunctionActor* Junction) const;
 	void QueueImportedRebuild();
 	virtual void PostLoad() override;
 	virtual void BeginPlay() override;
@@ -68,8 +76,13 @@ public:
 #endif
 
 private:
+	friend class ARoadGenerator;
+	bool bPreparingImportedRoads = false;
 	bool bImportedRebuildQueued = false;
 	bool bBuildingImportedNetwork = false;
+#if WITH_EDITOR
+	FString LastBuiltOutputSignature;
+#endif
 	void ClearImportedJunctions();
 	bool SolveImportedJunctions();
 };

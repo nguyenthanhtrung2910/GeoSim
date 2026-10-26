@@ -1,4 +1,5 @@
 #include "RoadGenerator.h"
+#include "RoadGenerationSignatures.h"
 
 #include "Components/SceneComponent.h"
 #include "ConcurrencyHelpers/Concurrency.h"
@@ -10,6 +11,7 @@
 #include "LandscapeSplineActor.h"
 
 #if WITH_EDITOR
+#include "UObject/StrongObjectPtr.h"
 #include "Misc/ScopedSlowTask.h"
 #include "LandscapeInfo.h"
 #include "LandscapeEditLayer.h"
@@ -18,42 +20,190 @@
 #include "LandscapeSplinesComponent.h"
 #include "Engine/World.h"
 #endif
-#if WITH_DEV_AUTOMATION_TESTS
-#include "Misc/AutomationTest.h"
-#endif
 
 DEFINE_LOG_CATEGORY_STATIC(LogRoadConstructorImport, Log, All);
 
-namespace
+namespace RoadGeneratorInternal
 {
-	struct FImportSpan
+#if WITH_EDITOR
+	namespace
 	{
-		int64 WayId = 0;
-		TArray<int64> SourceWayIds;
-		FName Highway;
-		TArray<FVector> Positions;
-		FString StartKey;
-		FString EndKey;
-	};
+		// Used only when regenerating Landscape splines: detach old output, delete it on
+		// Commit(), or restore it on failure. Road generation and clearing do not use this.
+		class FScopedLandscapeSplineReplacement
+		{
+		public:
+			FScopedLandscapeSplineReplacement(ULandscapeSplinesComponent* InSplines, ALandscape* InLandscape,
+			                                  const TSet<FString>& Prefixes, bool bAllObjects = false)
+				: Splines(InSplines), Landscape(InLandscape)
+			{
+				if (!Splines.IsValid()) return;
+				auto IsPreviousOutput = [&](const UObject* Object)
+				{
+					if (!Object) return false;
+					if (bAllObjects) return true;
+					for (const FString& Prefix : Prefixes)
+						if (Object->GetName().StartsWith(Prefix)) return true;
+					return false;
+				};
+				Splines->Modify();
+				auto& CurrentSegments = Splines->GetSegments();
+				for (int32 Index = CurrentSegments.Num() - 1; Index >= 0; --Index)
+				{
+					if (!IsPreviousOutput(CurrentSegments[Index])) continue;
+					Segments.Emplace(CurrentSegments[Index].Get());
+					CurrentSegments.RemoveAt(Index, 1, EAllowShrinking::No);
+				}
+				auto& CurrentPoints = Splines->GetControlPoints();
+				for (int32 Index = CurrentPoints.Num() - 1; Index >= 0; --Index)
+				{
+					if (!IsPreviousOutput(CurrentPoints[Index])) continue;
+					Points.Emplace(CurrentPoints[Index].Get());
+					CurrentPoints.RemoveAt(Index, 1, EAllowShrinking::No);
+				}
+				Refresh();
+			}
 
-	bool IsEnabledTag(const TMap<FString, FString>& Tags, const TCHAR* Key)
+			~FScopedLandscapeSplineReplacement() { Restore(); }
+
+			void Restore()
+			{
+				if (bFinalized) return;
+				if (Splines.IsValid())
+				{
+					for (const auto& Point : Points) Splines->GetControlPoints().AddUnique(Point.Get());
+					for (const auto& Segment : Segments) Splines->GetSegments().AddUnique(Segment.Get());
+				}
+				bFinalized = true;
+				Refresh();
+			}
+
+			void Commit()
+			{
+				if (bFinalized) return;
+				for (const auto& Segment : Segments)
+				{
+					Segment->Modify();
+					for (FLandscapeSplineSegmentConnection& Connection : Segment->Connections)
+					{
+						if (ULandscapeSplineControlPoint* Point = Connection.ControlPoint)
+						{
+							Point->Modify();
+							Point->ConnectedSegments.RemoveAll([&](const FLandscapeSplineConnection& Link) { return Link.Segment == Segment.Get(); });
+						}
+					}
+					Segment->ConditionalBeginDestroy();
+				}
+				for (const auto& Point : Points)
+				{
+					Point->Modify();
+					Point->ConnectedSegments.Reset();
+					Point->ConditionalBeginDestroy();
+				}
+				bFinalized = true;
+				Refresh();
+			}
+
+		private:
+			void Refresh() const
+			{
+				if (Splines.IsValid()) Splines->MarkRenderStateDirty();
+				if (Landscape.IsValid())
+				{
+					Landscape->RequestSplineLayerUpdate();
+					(void)Landscape->MarkPackageDirty();
+				}
+			}
+
+			TStrongObjectPtr<ULandscapeSplinesComponent> Splines;
+			TWeakObjectPtr<ALandscape> Landscape;
+			TArray<TStrongObjectPtr<ULandscapeSplineControlPoint>> Points;
+			TArray<TStrongObjectPtr<ULandscapeSplineSegment>> Segments;
+			bool bFinalized = false;
+		};
+	}
+#endif
+
+	static int32 ReadLaneCount(const TMap<FString, FString>& Tags)
 	{
-		const FString* Value = Tags.Find(Key);
-		return Value && !Value->IsEmpty() && !Value->Equals(TEXT("no"), ESearchCase::IgnoreCase) && *Value != TEXT("0") && !Value->Equals(TEXT("false"), ESearchCase::IgnoreCase);
+		const FString* Value = Tags.Find(TEXT("lanes"));
+		if (!Value) return 0;
+		const FString Text = Value->TrimStartAndEnd();
+		if (Text.IsEmpty()) return 0;
+		int32 Count = 0;
+		for (const TCHAR Ch : Text)
+		{
+			if (Ch < TEXT('0') || Ch > TEXT('9')) return 0;
+			Count = Count * 10 + Ch - TEXT('0');
+			// Bound allocations and reject malformed/overflowing source values.
+			if (Count > 64) return 0;
+		}
+		return Count;
 	}
 
-	bool IsGroundRoad(const FImportedRoadWay& Way, const TArray<FName>& Filter)
+	// Keep the existing lane definitions in order. Extend the outermost driving
+	// lane before the sidewalk/shoulder, borrowing from the other side if needed.
+	static void ResizeDrivingLanes(TArray<FRoadLaneStyle>& Lanes, const int32 Count, const FRoadLaneStyle& Fallback)
+	{
+		TArray<FRoadLaneStyle> Result;
+		int32 Kept = 0;
+		int32 InsertAt = 0;
+		FRoadLaneStyle Template = Fallback;
+		for (const FRoadLaneStyle& Lane : Lanes)
+		{
+			if (Lane.LaneType == ELaneType::Driving)
+			{
+				if (Kept >= Count) continue;
+				++Kept;
+				Template = Lane;
+				Result.Add(Lane);
+				InsertAt = Result.Num();
+			}
+			else Result.Add(Lane);
+		}
+		for (; Kept < Count; ++Kept) Result.Insert(Template, InsertAt++);
+		Lanes = MoveTemp(Result);
+	}
+
+	static bool GetLaneCountLayout(const URoadStyle* Source, const int32 LaneCount,
+		TArray<FRoadLaneStyle>& Left, TArray<FRoadLaneStyle>& Right)
+	{
+		if (!Source) return false;
+		Left = Source->LeftLanes;
+		Right = Source->RightLanes;
+		if (LaneCount <= 0) return false;
+		auto IsDriving = [](const FRoadLaneStyle& Lane) { return Lane.LaneType == ELaneType::Driving; };
+		const FRoadLaneStyle* Template = Source->LeftLanes.FindByPredicate(IsDriving);
+		if (!Template) Template = Source->RightLanes.FindByPredicate(IsDriving);
+		if (!Template) return false; // No driving attributes to inherit from this style.
+		ResizeDrivingLanes(Left, LaneCount / 2 + LaneCount % 2, *Template);
+		ResizeDrivingLanes(Right, LaneCount / 2, *Template);
+		return true;
+	}
+
+	URoadStyle* CreateLaneCountStyle(UObject* Outer, const URoadStyle* Source, const int32 LaneCount)
+	{
+		if (!IsValid(Source)) return nullptr;
+		URoadStyle* Style = DuplicateObject<URoadStyle>(Source, Outer);
+		Style->ClearFlags(RF_Standalone);
+		// World Partition roads can live in another package than their owning scene.
+		Style->SetFlags(RF_Public | RF_Transactional);
+		TArray<FRoadLaneStyle> Left, Right;
+		if (GetLaneCountLayout(Source, LaneCount, Left, Right))
+		{
+			Style->LeftLanes = MoveTemp(Left);
+			Style->RightLanes = MoveTemp(Right);
+		}
+		return Style;
+	}
+
+	static bool MatchesHighwayFilter(const FImportedRoadWay& Way, const TArray<FName>& Filter)
 	{
 		const FString* Highway = Way.Tags.Find(TEXT("highway"));
-		if (!Highway || Highway->IsEmpty() || IsEnabledTag(Way.Tags, TEXT("area")) || IsEnabledTag(Way.Tags, TEXT("bridge")) || IsEnabledTag(Way.Tags, TEXT("tunnel"))) return false;
-		static const TSet<FName> Excluded = { TEXT("footway"), TEXT("path"), TEXT("steps"), TEXT("cycleway"), TEXT("pedestrian"), TEXT("bridleway"), TEXT("construction"), TEXT("proposed"), TEXT("platform") };
-		const FName Kind(**Highway);
-		if (Excluded.Contains(Kind) || (!Filter.IsEmpty() && !Filter.Contains(Kind))) return false;
-		const FString* Layer = Way.Tags.Find(TEXT("layer"));
-		return !Layer || FCString::Atoi(**Layer) == 0;
+		return Highway && !Highway->IsEmpty() && (Filter.IsEmpty() || Filter.Contains(FName(**Highway)));
 	}
 
-	FString NodeKey(const FImportedRoadWay& Way, const FImportedRoadPoint& Point)
+	static FString NodeKey(const FImportedRoadWay& Way, const FImportedRoadPoint& Point)
 	{
 		if (Point.NodeId <= 0) return FString();
 		const FString* Layer = Way.Tags.Find(TEXT("layer"));
@@ -61,23 +211,50 @@ namespace
 	}
 
 #if WITH_EDITOR
-	// Road Constructor stores its persistent splines on the Landscape, outside the road actor.
-	// Match only the objects its public Terrain Deform command creates for our roads.
-	void RemoveRoadConstructorSplines(AOsmRoadScene* Scene, ALandscape* Landscape)
+	static FString GetRoadSplinePrefix(const ARoadActor* Road)
 	{
-		if (!IsValid(Scene) || !IsValid(Landscape)) return;
-		ULandscapeSplinesComponent* Splines = Landscape->GetSplinesComponent();
-		if (!Splines) return;
+		FString Key;
+		for (const TCHAR Ch : Road->GetName().Left(80))
+			Key.AppendChar((FChar::IsAlnum(Ch) || Ch == static_cast<TCHAR>('_')) ? Ch : static_cast<TCHAR>('_'));
+		return FString::Printf(TEXT("RC_LandscapeSplinePrototype_%s_"), *Key);
+	}
+
+	static TSet<FString> GetRoadSplinePrefixes(const AOsmRoadScene* Scene)
+	{
 		TSet<FString> Prefixes;
-		for (ARoadActor* Road : Scene->Roads)
+		if (!IsValid(Scene)) return Prefixes;
+		for (const ARoadActor* Road : Scene->Roads)
 		{
 			if (!IsValid(Road)) continue;
-			FString Key;
-			for (TCHAR Ch : Road->GetName().Left(80))
-				Key.AppendChar((FChar::IsAlnum(Ch) || Ch == TCHAR('_')) ? Ch : TCHAR('_'));
-			Prefixes.Add(FString::Printf(TEXT("RC_LandscapeSplinePrototype_%s_"), *Key));
+			Prefixes.Add(GetRoadSplinePrefix(Road));
 		}
-		auto IsOurs = [&Prefixes](const UObject* Object)
+		return Prefixes;
+	}
+
+	static void FlushLandscapeSplineChanges(ALandscape* PreviousLandscape, ALandscape* TargetLandscape)
+	{
+		auto rebuild = [](ALandscape* Landscape)
+		{
+			if (!IsValid(Landscape)) return;
+			// The vendor also stamps deformation directly into the reserved layer. Clear
+			// every component and reapply remaining splines, including other owners' splines.
+			if (Landscape->FindEditLayerOfTypeConst(ULandscapeEditLayerSplines::StaticClass()))
+				Landscape->UpdateAllLandscapeSplines(FGuid(), true);
+			Landscape->ForceLayersFullUpdate();
+			(void)Landscape->MarkPackageDirty();
+		};
+		rebuild(PreviousLandscape);
+		if (TargetLandscape != PreviousLandscape) rebuild(TargetLandscape);
+	}
+
+	// Road Constructor stores its persistent splines on the Landscape, outside the road actor.
+	// Match only the objects its public Terrain Deform command creates for our roads.
+	static void RemoveRoadConstructorSplines(const TSet<FString>& Prefixes, ALandscape* Landscape)
+	{
+		if (Prefixes.IsEmpty() || !IsValid(Landscape)) return;
+		ULandscapeSplinesComponent* Splines = Landscape->GetSplinesComponent();
+		if (!Splines) return;
+		auto is_ours = [&Prefixes](const UObject* Object)
 		{
 			if (!Object) return false;
 			for (const FString& Prefix : Prefixes)
@@ -89,7 +266,7 @@ namespace
 		for (int32 Index = Segments.Num() - 1; Index >= 0; --Index)
 		{
 			ULandscapeSplineSegment* Segment = Segments[Index];
-			if (!IsOurs(Segment)) continue;
+			if (!is_ours(Segment)) continue;
 			Segment->Modify();
 			for (FLandscapeSplineSegmentConnection& Connection : Segment->Connections)
 			{
@@ -106,7 +283,7 @@ namespace
 		for (int32 Index = Points.Num() - 1; Index >= 0; --Index)
 		{
 			ULandscapeSplineControlPoint* Point = Points[Index];
-			if (!IsOurs(Point)) continue;
+			if (!is_ours(Point)) continue;
 			Point->Modify();
 			Point->ConnectedSegments.Reset();
 			Points.RemoveAt(Index, 1, EAllowShrinking::No);
@@ -114,16 +291,13 @@ namespace
 		}
 		Splines->MarkRenderStateDirty();
 		Landscape->RequestSplineLayerUpdate();
-		Landscape->MarkPackageDirty();
+		[[maybe_unused]] bool Marked = Landscape->MarkPackageDirty();
 	}
 
-	bool HasRoadConstructorSpline(const ARoadActor* Road, const ALandscape* Landscape)
+	static bool HasRoadConstructorSpline(const ARoadActor* Road, const ALandscape* Landscape)
 	{
 		if (!Road || !Landscape || !Landscape->GetSplinesComponent()) return false;
-		FString Key;
-		for (TCHAR Ch : Road->GetName().Left(80))
-			Key.AppendChar((FChar::IsAlnum(Ch) || Ch == TCHAR('_')) ? Ch : TCHAR('_'));
-		const FString Prefix = FString::Printf(TEXT("RC_LandscapeSplinePrototype_%s_"), *Key);
+		const FString Prefix = GetRoadSplinePrefix(Road);
 		for (const ULandscapeSplineControlPoint* Point : Landscape->GetSplinesComponent()->GetControlPoints())
 			if (Point && Point->GetName().StartsWith(Prefix)) return true;
 		return false;
@@ -131,19 +305,18 @@ namespace
 
 #endif
 
-	TArray<FImportSpan> PrepareSpans(const TArray<FImportedRoadWay>& Ways, const TArray<FName>& Filter, bool bRequireTerrain, double HeightOffset, double MergeDistance = 1000.0)
+	TArray<FImportSpan> PrepareSpans(const TArray<FImportedRoadWay>& Ways, const TArray<FName>& Filter, bool bRequireTerrain, double HeightOffset, double MergeDistance)
 	{
 		TArray<const FImportedRoadWay*> Selected;
 		TMap<FString, int32> Occurrences;
 		for (const FImportedRoadWay& Way : Ways)
 		{
-			if (!IsGroundRoad(Way, Filter)) continue;
+			if (!MatchesHighwayFilter(Way, Filter)) continue;
 			Selected.Add(&Way);
 			for (const FImportedRoadPoint& Point : Way.Points)
 			{
 				if (Point.WorldLocation.ContainsNaN() || (bRequireTerrain && !Point.bHasTerrain)) continue;
-				const FString Key = NodeKey(Way, Point);
-				if (!Key.IsEmpty()) ++Occurrences.FindOrAdd(Key);
+				if (const FString Key = NodeKey(Way, Point); !Key.IsEmpty()) ++Occurrences.FindOrAdd(Key);
 			}
 		}
 
@@ -151,24 +324,25 @@ namespace
 		for (const FImportedRoadWay* Way : Selected)
 		{
 			FImportSpan Span;
-			auto ResetSpan = [&]()
+			auto reset_span = [&]()
 			{
 				Span = FImportSpan();
 				Span.WayId = Way->WayId;
 				Span.SourceWayIds.Add(Way->WayId);
 				Span.Highway = FName(*Way->Tags.FindChecked(TEXT("highway")));
+				Span.LaneCount = ReadLaneCount(Way->Tags);
 			};
-			auto FlushSpan = [&]()
+			auto flush_span = [&]()
 			{
 				if (Span.Positions.Num() >= 2) Result.Add(MoveTemp(Span));
-				ResetSpan();
+				reset_span();
 			};
-			ResetSpan();
+			reset_span();
 			for (const FImportedRoadPoint& Point : Way->Points)
 			{
 				if (Point.WorldLocation.ContainsNaN() || (bRequireTerrain && !Point.bHasTerrain))
 				{
-					FlushSpan();
+					flush_span();
 					continue;
 				}
 				FVector Position = Point.WorldLocation;
@@ -178,15 +352,14 @@ namespace
 				if (Span.Positions.IsEmpty()) Span.StartKey = Key;
 				Span.Positions.Add(Position);
 				Span.EndKey = Key;
-				const int32* Count = Occurrences.Find(Key);
-				if (Count && *Count > 1 && Span.Positions.Num() >= 2)
+				if (const int32* Count = Occurrences.Find(Key); Count && *Count > 1 && Span.Positions.Num() >= 2)
 				{
-					FlushSpan();
+					flush_span();
 					Span.StartKey = Span.EndKey = Key;
 					Span.Positions.Add(Position);
 				}
 			}
-			FlushSpan();
+			flush_span();
 		}
 
 		// A closed way needs two distinct source actors: the vendor intentionally
@@ -200,6 +373,7 @@ namespace
 			Tail.WayId = Span.WayId;
 			Tail.SourceWayIds = Span.SourceWayIds;
 			Tail.Highway = Span.Highway;
+			Tail.LaneCount = Span.LaneCount;
 			Tail.StartKey = FString::Printf(TEXT("loop:%lld:%d"), Span.WayId, Index);
 			Tail.EndKey = Span.EndKey;
 			Tail.Positions.Append(Span.Positions.GetData() + Middle, Span.Positions.Num() - Middle);
@@ -216,7 +390,7 @@ namespace
 			if (!Span.EndKey.IsEmpty()) ++Degree.FindOrAdd(Span.EndKey);
 		}
 		TMap<FString, FString> Parent;
-		auto Root = [&Parent](FString Key)
+		auto root = [&Parent](FString Key)
 		{
 			while (const FString* Next = Parent.Find(Key)) Key = *Next;
 			return Key;
@@ -229,8 +403,8 @@ namespace
 			double Length = 0;
 			for (int32 Point = 1; Point < Span.Positions.Num(); ++Point) Length += FVector::Dist2D(Span.Positions[Point - 1], Span.Positions[Point]);
 			if (Length > MergeDistance) continue;
-			const FString Start = Root(Span.StartKey);
-			const FString End = Root(Span.EndKey);
+			const FString Start = root(Span.StartKey);
+			const FString End = root(Span.EndKey);
 			if (Start != End) Parent.Add(End, Start);
 			Contracted.Add(Index);
 		}
@@ -239,21 +413,23 @@ namespace
 			if (Contracted.Contains(Index)) Result.RemoveAt(Index);
 			else
 			{
-				Result[Index].StartKey = Root(Result[Index].StartKey);
-				Result[Index].EndKey = Root(Result[Index].EndKey);
+				Result[Index].StartKey = root(Result[Index].StartKey);
+				Result[Index].EndKey = root(Result[Index].EndKey);
 			}
 		}
 		return Result;
 	}
 
-	bool HasSymmetricLaneStyle(const URoadStyle* Style)
+	static bool HasSymmetricLaneStyle(const URoadStyle* Style, const int32 LaneCount)
 	{
 		if (!Style) return true;
-		if (Style->LeftLanes.Num() != Style->RightLanes.Num()) return false;
-		for (int32 Index = 0; Index < Style->LeftLanes.Num(); ++Index)
+		TArray<FRoadLaneStyle> LeftLanes, RightLanes;
+		GetLaneCountLayout(Style, LaneCount, LeftLanes, RightLanes);
+		if (LeftLanes.Num() != RightLanes.Num()) return false;
+		for (int32 Index = 0; Index < LeftLanes.Num(); ++Index)
 		{
-			const FRoadLaneStyle& Left = Style->LeftLanes[Index];
-			const FRoadLaneStyle& Right = Style->RightLanes[Index];
+			const FRoadLaneStyle& Left = LeftLanes[Index];
+			const FRoadLaneStyle& Right = RightLanes[Index];
 			if (Left.Width != Right.Width || Left.LaneType != Right.LaneType || Left.PhysicalMaterial != Right.PhysicalMaterial ||
 				Left.LaneShapeSource != Right.LaneShapeSource || Left.LaneShape != Right.LaneShape ||
 				Left.LaneMarking != Right.LaneMarking || Left.Props != Right.Props) return false;
@@ -261,7 +437,7 @@ namespace
 		return true;
 	}
 
-	int32 MergeStraightSpans(TArray<FImportSpan>& Spans, double AngleTolerance, TFunctionRef<URoadStyle*(FName)> ResolveStyle)
+	int32 MergeStraightSpans(TArray<FImportSpan>& Spans, const double AngleTolerance, const TFunctionRef<URoadStyle*(const FImportSpan&)>& ResolveStyle)
 	{
 		struct FEndpoint { int32 SpanIndex; bool bStart; };
 		TMap<FString, TArray<FEndpoint>> Endpoints;
@@ -288,9 +464,9 @@ namespace
 			FImportSpan& A = Spans[First.SpanIndex];
 			FImportSpan& B = Spans[Second.SpanIndex];
 			if (A.Positions.Num() < 2 || B.Positions.Num() < 2) continue;
-			URoadStyle* Style = ResolveStyle(A.Highway);
-			if (Style != ResolveStyle(B.Highway)) continue;
-			if ((First.bStart || !Second.bStart) && !HasSymmetricLaneStyle(Style)) continue;
+			URoadStyle* Style = ResolveStyle(A);
+			if (Style != ResolveStyle(B) || A.LaneCount != B.LaneCount) continue;
+			if ((First.bStart || !Second.bStart) && !HasSymmetricLaneStyle(Style, A.LaneCount)) continue;
 			const FVector& JoinA = First.bStart ? A.Positions[0] : A.Positions.Last();
 			const FVector& JoinB = Second.bStart ? B.Positions[0] : B.Positions.Last();
 			// Contracted junction aliases may share a key but be physically separated.
@@ -331,6 +507,8 @@ namespace
 	}
 }
 
+using namespace RoadGeneratorInternal;
+
 ARoadGenerator::ARoadGenerator()
 {
 	PrimaryActorTick.bCanEverTick = false;
@@ -346,20 +524,9 @@ ARoadGenerator::ARoadGenerator()
 
 void ARoadGenerator::GenerateRoads()
 {
-	StartGeneration(false);
-}
-
-void ARoadGenerator::GenerateLandscapeSplines()
-{
-	StartGeneration(true);
-}
-
-void ARoadGenerator::StartGeneration(bool bOnlyLandscapeSplines)
-{
 #if WITH_EDITOR
 	if (bGenerationInProgress) return;
 	bGenerationInProgress = true;
-	bLandscapeSplinesOnly = bOnlyLandscapeSplines;
 	GenerateFromGameThread(NAME_None, true, [WeakThis = TWeakObjectPtr<ARoadGenerator>(this)](bool)
 	{
 		AsyncTask(ENamedThreads::GameThread, [WeakThis]()
@@ -367,7 +534,6 @@ void ARoadGenerator::StartGeneration(bool bOnlyLandscapeSplines)
 			if (WeakThis.IsValid())
 			{
 				WeakThis->bGenerationInProgress = false;
-				WeakThis->bLandscapeSplinesOnly = false;
 			}
 		});
 	});
@@ -379,78 +545,248 @@ void ARoadGenerator::ClearRoads()
 	if (!bGenerationInProgress) Execute_Cleanup(this, true);
 }
 
+void ARoadGenerator::GenerateLandscapeSplines()
+{
+#if WITH_EDITOR
+	if (bGenerationInProgress) return;
+	TGuardValue<bool> GeneratingGuard(bGenerationInProgress, true);
+	GenerateLandscapeSplinesInternal();
+#endif
+}
+
 void ARoadGenerator::ClearLandscapeSplines()
 {
 #if WITH_EDITOR
 	if (bGenerationInProgress) return;
-	if (!GeneratedLandscapeSplineActor.IsNull() && !GeneratedLandscapeSplineActor.IsValid())
-	{
-		UE_LOG(LogRoadConstructorImport, Error, TEXT("Load the previous Landscape spline actor before clearing it."));
-		return;
-	}
-	if (GeneratedScene.IsValid() && GeneratedSplineLandscape.IsValid())
-	{
-		RemoveRoadConstructorSplines(GeneratedScene.Get(), GeneratedSplineLandscape.Get());
-	}
-	if (GeneratedLandscapeSplineActor.IsValid()) GeneratedLandscapeSplineActor->Destroy();
-	Modify();
-	GeneratedLandscapeSplineActor.Reset();
-	if (ALandscape* Landscape = GeneratedSplineLandscape.Get()) Landscape->RequestSplineLayerUpdate();
-	GeneratedSplineLandscape.Reset();
-	MarkPackageDirty();
+	TGuardValue<bool> GeneratingGuard(bGenerationInProgress, true);
+	ClearLandscapeSplinesInternal();
 #endif
 }
 
-bool ARoadGenerator::BuildLandscapeSplines(AOsmRoadScene* Scene)
+void ARoadGenerator::RememberLandscapeSplineOwnership()
 {
 #if WITH_EDITOR
-	if (!IsValid(Scene) || !IsValid(TargetLandscape) || !TargetLandscape->GetLandscapeInfo()) return false;
-	if (!GeneratedLandscapeSplineActor.IsNull() && !GeneratedLandscapeSplineActor.IsValid())
+	// Migrate ownership from levels saved before splines were independently tracked.
+	if (GeneratedSplinePrefixes.IsEmpty() && !GeneratedSplineLandscape.IsNull() && GeneratedScene.IsValid())
 	{
-		UE_LOG(LogRoadConstructorImport, Error, TEXT("Load the previous Landscape spline actor before replacing it."));
+		Modify();
+		GeneratedSplinePrefixes = GetRoadSplinePrefixes(GeneratedScene.Get());
+	}
+#endif
+}
+
+bool ARoadGenerator::GenerateLandscapeSplinesInternal()
+{
+#if WITH_EDITOR
+	if (!GeneratedScene.IsValid() || !IsValid(TargetLandscape) || !TargetLandscape->GetLandscapeInfo())
+	{
+		UE_LOG(LogRoadConstructorImport, Error,
+		       TEXT("Generate Roads first and select a loaded Target Landscape before generating Landscape splines."));
 		return false;
 	}
-	if (!bDeformLandscape) return true;
-	if (TargetLandscape->GetEditLayersOfType(ULandscapeEditLayerSplines::StaticClass()).IsEmpty())
+	if ((!GeneratedSplineLandscape.IsNull() && !GeneratedSplineLandscape.IsValid()) ||
+		(!GeneratedLandscapeSplineActor.IsNull() && !GeneratedLandscapeSplineActor.IsValid()))
 	{
-		TargetLandscape->Modify();
-		if (!bCreateSplineLayerIfMissing || TargetLandscape->CreateLayer(NAME_None, ULandscapeEditLayerSplines::StaticClass()) == INDEX_NONE)
+		UE_LOG(LogRoadConstructorImport, Error,
+		       TEXT("Load the previous Landscape and legacy spline actor before replacing Landscape splines."));
+		return false;
+	}
+	if (!FMath::IsFinite(LandscapeHeightOffsetCm) || !FMath::IsFinite(LandscapeSplineSideFalloffCm) ||
+		LandscapeSplineSideFalloffCm < 0.0 ||
+		!FMath::IsFinite(LandscapeSplineEndFalloffCm) || LandscapeSplineEndFalloffCm < 0.0) return false;
+	for (const ARoadActor* Road : GeneratedScene->Roads)
+	{
+		if (!IsValid(Road) || !Road->BaseCurve || Road->BaseCurve->Curve.Points.Num() < 2)
 		{
-			UE_LOG(LogRoadConstructorImport, Error, TEXT("Create a reserved Landscape Splines edit layer on Target Landscape, or enable Create Spline Layer If Missing."));
+			UE_LOG(LogRoadConstructorImport, Error, TEXT("Load all generated roads before generating Landscape splines."));
 			return false;
 		}
 	}
+	if (GeneratedScene->Roads.IsEmpty()) return false;
+	const FString SplineInputs = RoadGenerationSignatures::LandscapeInputs(*this, *GeneratedScene.Get());
+	if (!CachedSplineOutput.IsEmpty() && CachedSplineInputs == SplineInputs && GeneratedSplineLandscape.Get() == TargetLandscape.Get() &&
+		CachedSplineOutput == RoadGenerationSignatures::LandscapeOutput(TargetLandscape, GeneratedSplinePrefixes))
+	{
+		UE_LOG(LogRoadConstructorImport, Display, TEXT("Landscape spline inputs and output are unchanged; skipped generation."));
+		return true;
+	}
+	if (!EnsureLandscapeSplineLayer()) return false;
+	RememberLandscapeSplineOwnership();
+	ALandscape* PreviousLandscape = GeneratedSplineLandscape.Get();
+	TUniquePtr<FScopedLandscapeSplineReplacement> PreviousSplines;
+	if (IsValid(PreviousLandscape))
+		PreviousSplines = MakeUnique<FScopedLandscapeSplineReplacement>(PreviousLandscape->GetSplinesComponent(),
+		                                                                PreviousLandscape, GeneratedSplinePrefixes);
+	TUniquePtr<FScopedLandscapeSplineReplacement> LegacySplines;
+	if (GeneratedLandscapeSplineActor.IsValid())
+		LegacySplines = MakeUnique<FScopedLandscapeSplineReplacement>(
+			GeneratedLandscapeSplineActor->GetSplinesComponent(), PreviousLandscape, TSet<FString>(), true);
+	FlushLandscapeSplineChanges(PreviousLandscape, TargetLandscape);
+	if (!BuildLandscapeSplines(GeneratedScene.Get()))
+	{
+		RemoveRoadConstructorSplines(GetRoadSplinePrefixes(GeneratedScene.Get()), TargetLandscape);
+		if (PreviousSplines) PreviousSplines->Restore();
+		if (LegacySplines) LegacySplines->Restore();
+		FlushLandscapeSplineChanges(PreviousLandscape, TargetLandscape);
+		return false;
+	}
+	if (PreviousSplines) PreviousSplines->Commit();
+	if (LegacySplines) LegacySplines->Commit();
+	if (GeneratedLandscapeSplineActor.IsValid()) GeneratedLandscapeSplineActor->Destroy();
+	Modify();
+	GeneratedLandscapeSplineActor.Reset();
+	GeneratedSplineLandscape = TargetLandscape;
+	GeneratedSplinePrefixes = GetRoadSplinePrefixes(GeneratedScene.Get());
+	FlushLandscapeSplineChanges(PreviousLandscape, TargetLandscape);
+	CachedSplineInputs = RoadGenerationSignatures::LandscapeInputs(*this, *GeneratedScene.Get());
+	CachedSplineOutput = RoadGenerationSignatures::LandscapeOutput(TargetLandscape, GeneratedSplinePrefixes);
+	(void)MarkPackageDirty();
+	return true;
+#else
+	return false;
+#endif
+}
+
+bool ARoadGenerator::ClearLandscapeSplinesInternal()
+{
+#if WITH_EDITOR
+	if ((!GeneratedSplineLandscape.IsNull() && !GeneratedSplineLandscape.IsValid()) ||
+		(!GeneratedLandscapeSplineActor.IsNull() && !GeneratedLandscapeSplineActor.IsValid()))
+	{
+		UE_LOG(LogRoadConstructorImport, Error,
+		       TEXT("Load the previous Landscape and legacy spline actor before clearing Landscape splines."));
+		return false;
+	}
+	RememberLandscapeSplineOwnership();
+	ALandscape* PreviousLandscape = GeneratedSplineLandscape.Get();
+	RemoveRoadConstructorSplines(GeneratedSplinePrefixes, PreviousLandscape);
+	if (GeneratedLandscapeSplineActor.IsValid()) GeneratedLandscapeSplineActor->Destroy();
+	Modify();
+	GeneratedLandscapeSplineActor.Reset();
+	GeneratedSplineLandscape.Reset();
+	GeneratedSplinePrefixes.Reset();
+	CachedSplineInputs.Reset();
+	CachedSplineOutput.Reset();
+	FlushLandscapeSplineChanges(PreviousLandscape, nullptr);
+	(void)MarkPackageDirty();
+	return true;
+#else
+	return false;
+#endif
+}
+
+bool ARoadGenerator::EnsureLandscapeSplineLayer() const
+{
+#if WITH_EDITOR
+	if (!IsValid(TargetLandscape) || !TargetLandscape->GetLandscapeInfo()) return false;
+	// UE 5.8 GetEditLayersOfType currently returns all layers without filtering.
+	ULandscapeEditLayerBase* SplineLayer = TargetLandscape->FindEditLayerOfType(ULandscapeEditLayerSplines::StaticClass());
+	// Road Constructor recognizes these reserved layer names when applying deformation.
+	const FName SupportedNames[] = {
+		TEXT("Splines"), TEXT("Landscape Splines"), TEXT("Spline"), TEXT("Landscape Spline")
+	};
+	if (SplineLayer)
+	{
+		for (FName Name : SupportedNames)
+			if (SplineLayer->GetName() == Name) return true;
+	}
+	else if (!bCreateSplineLayerIfMissing)
+	{
+		UE_LOG(LogRoadConstructorImport, Error,
+		       TEXT(
+			       "Create a reserved Landscape Splines edit layer on Target Landscape, or enable Create Spline Layer If Missing."
+		       ));
+		return false;
+	}
+	for (FName Name : SupportedNames)
+	{
+		if (TargetLandscape->GetEditLayerConst(Name)) continue;
+		TargetLandscape->Modify();
+		if (SplineLayer)
+		{
+			SplineLayer->SetName(Name, true);
+			return true;
+		}
+		if (TargetLandscape->CreateLayer(Name, ULandscapeEditLayerSplines::StaticClass()) != INDEX_NONE) return true;
+		break;
+	}
+	UE_LOG(LogRoadConstructorImport, Error,
+	       TEXT("Could not prepare a reserved Landscape spline edit layer with a name supported by Road Constructor."));
+	return false;
+#else
+	return false;
+#endif
+}
+
+bool ARoadGenerator::BuildLandscapeSplines(AOsmRoadScene* Scene) const
+{
+#if WITH_EDITOR
+	if (!IsValid(Scene) || !EnsureLandscapeSplineLayer()) return false;
+	const FName SplineLayerName = TargetLandscape->FindEditLayerOfTypeConst(ULandscapeEditLayerSplines::StaticClass())->GetName();
 	int32 CreatedRoads = 0;
 	for (ARoadActor* Road : Scene->Roads)
 	{
 		if (!IsValid(Road)) continue;
 		Road->Modify();
 		Road->bEnableTerrainDeform = true;
-		Road->TerrainDeformLandscapeSplineHeightOffset =
-			GetDefault<AOsmRoadActor>()->TerrainDeformLandscapeSplineHeightOffset - SurfaceOffsetCm;
+		Road->TerrainDeformTargetLandscapeSplineEditLayer = SplineLayerName;
+		// The native command supplies topology and XY samples. Its roadbed heights
+		// are replaced below using the imported baseline, independent of mesh offset.
+		Road->TerrainDeformLandscapeSplineHeightOffset = 0.0;
 		Road->CreatePersistentLandscapeSplineEditLayerPrototype();
 		if (!HasRoadConstructorSpline(Road, TargetLandscape))
 		{
-			UE_LOG(LogRoadConstructorImport, Error, TEXT("Road Constructor failed to create a Landscape spline for %s on Target Landscape."), *GetNameSafe(Road));
-			RemoveRoadConstructorSplines(Scene, TargetLandscape);
+			UE_LOG(LogRoadConstructorImport, Error,
+			       TEXT("Road Constructor failed to create a Landscape spline for %s on Target Landscape."),
+			       *GetNameSafe(Road));
+			RemoveRoadConstructorSplines(GetRoadSplinePrefixes(Scene), TargetLandscape);
 			return false;
+		}
+		// Use only Driving and Shoulder widths, with explicit falloff values,
+		// after the plugin creates the native control points.
+		double RoadWidth = 0.0;
+		if (const URoadStyle* Style = Road->LastAppliedRoadStyle)
+		{
+			for (const TArray<FRoadLaneStyle>* Lanes : { &Style->LeftLanes, &Style->RightLanes })
+				for (const FRoadLaneStyle& Lane : *Lanes)
+					if ((Lane.LaneType == ELaneType::Driving || Lane.LaneType == ELaneType::Shoulder) && FMath::IsFinite(Lane.Width))
+						RoadWidth += FMath::Max(0.0, Lane.Width);
+		}
+		const FString Prefix = GetRoadSplinePrefix(Road);
+		TSet<ULandscapeSplineSegment*> SegmentsToUpdate;
+		for (ULandscapeSplineControlPoint* Point : TargetLandscape->GetSplinesComponent()->GetControlPoints())
+		{
+			if (!Point || !Point->GetName().StartsWith(Prefix)) continue;
+			Point->Modify();
+			ULandscapeSplinesComponent* Splines = TargetLandscape->GetSplinesComponent();
+			FVector WorldPosition = Splines->GetComponentTransform().TransformPosition(Point->Location);
+			const double Distance = FMath::Clamp(Road->BaseCurve->Curve.GetUV(WorldPosition).X, 0.0, Road->Length());
+			WorldPosition.Z = Road->GetHeight(Distance) - Scene->ImportedSurfaceOffsetCm + LandscapeHeightOffsetCm;
+			Point->Location = Splines->GetComponentTransform().InverseTransformPosition(WorldPosition);
+			const FVector Direction = Splines->GetComponentTransform().InverseTransformVectorNoScale(Road->GetDir(Distance));
+			if (!Direction.IsNearlyZero()) Point->Rotation = Direction.Rotation();
+			Point->Width = static_cast<float>(RoadWidth * 0.5); // Native Width is a half-width.
+			Point->SideFalloff = static_cast<float>(LandscapeSplineSideFalloffCm);
+			Point->EndFalloff = Point->ConnectedSegments.Num() <= 1 ? static_cast<float>(LandscapeSplineEndFalloffCm) : 0.0f;
+			for (const FLandscapeSplineConnection& Connection : Point->ConnectedSegments)
+				if (Connection.Segment) SegmentsToUpdate.Add(Connection.Segment);
+			Point->UpdateSplinePoints(false, false);
+		}
+		for (ULandscapeSplineSegment* Segment : SegmentsToUpdate)
+		{
+			Segment->Modify();
+			Segment->UpdateSplinePoints();
 		}
 		++CreatedRoads;
 	}
 	if (CreatedRoads == 0) return false;
-	if (Scene == GeneratedScene.Get() && GeneratedSplineLandscape.IsValid() && GeneratedSplineLandscape.Get() != TargetLandscape)
-		RemoveRoadConstructorSplines(Scene, GeneratedSplineLandscape.Get());
-	if (Scene == GeneratedScene.Get())
-	{
-		if (GeneratedLandscapeSplineActor.IsValid()) GeneratedLandscapeSplineActor->Destroy();
-		Modify();
-		GeneratedLandscapeSplineActor.Reset();
-		GeneratedSplineLandscape = TargetLandscape;
-	}
-	TargetLandscape->RequestSplineLayerUpdate();
-	TargetLandscape->MarkPackageDirty();
-	MarkPackageDirty();
-	UE_LOG(LogRoadConstructorImport, Display, TEXT("Applied Road Constructor Terrain Deform to %d generated roads."), CreatedRoads);
+	// Discard the plugin's wider direct stamps and rebuild from the final native
+	// spline dimensions, including existing splines belonging to other generators.
+	FlushLandscapeSplineChanges(nullptr, TargetLandscape);
+	[[maybe_unused]] bool LandscapeMarked = TargetLandscape->MarkPackageDirty();
+	[[maybe_unused]] bool Marked =MarkPackageDirty();
+	UE_LOG(LogRoadConstructorImport, Display, TEXT("Applied Road Constructor Terrain Deform to %d generated roads."),
+	       CreatedRoads);
 	return true;
 #else
 	return false;
@@ -460,50 +796,39 @@ TArray<UObject*> ARoadGenerator::GetGeneratedObjects() const
 {
 	TArray<UObject*> Objects;
 	if (GeneratedScene.IsValid()) Objects.Add(GeneratedScene.Get());
-	if (GeneratedLandscapeSplineActor.IsValid()) Objects.Add(GeneratedLandscapeSplineActor.Get());
 	return Objects;
 }
 
-bool ARoadGenerator::Cleanup_Implementation(bool bSkipPrompt)
+bool ARoadGenerator::Cleanup_Implementation(const bool bSkipPrompt)
 {
-	if ((!GeneratedScene.IsNull() && !GeneratedScene.IsValid()) ||
-		(!GeneratedLandscapeSplineActor.IsNull() && !GeneratedLandscapeSplineActor.IsValid()))
+	if (!GeneratedScene.IsNull() && !GeneratedScene.IsValid())
 	{
-		UE_LOG(LogRoadConstructorImport, Error, TEXT("Load the previous Road Constructor scene and Landscape spline actor before clearing them."));
+		UE_LOG(LogRoadConstructorImport, Error, TEXT("Load the previous Road Constructor scene before clearing roads."));
 		return false;
 	}
-#if WITH_EDITOR
-	if (GeneratedScene.IsValid() && GeneratedSplineLandscape.IsValid())
-		RemoveRoadConstructorSplines(GeneratedScene.Get(), GeneratedSplineLandscape.Get());
-#endif
+	RememberLandscapeSplineOwnership();
 	if (!DeleteGeneratedObjects(bSkipPrompt)) return false;
 	Modify();
 	GeneratedScene.Reset();
-	GeneratedLandscapeSplineActor.Reset();
-#if WITH_EDITOR
-	if (ALandscape* Landscape = GeneratedSplineLandscape.Get()) Landscape->RequestSplineLayerUpdate();
-#endif
-	GeneratedSplineLandscape.Reset();
+	CachedRoadInputs.Reset();
+	CachedRoadOutput.Reset();
 	return true;
 }
 
-bool ARoadGenerator::OnGenerate(FName SpawnedActorsPathOverride, bool bIsUserInitiated)
+bool ARoadGenerator::OnGenerate(const FName SpawnedActorsPathOverride, bool bIsUserInitiated)
 {
 #if WITH_EDITOR
 	const bool bConfigured = Concurrency::RunOnGameThreadAndWait([this]()
 	{
-		return (bLandscapeSplinesOnly ? GeneratedScene.IsValid() : (IsValid(OSMRoadImporter) && IsValid(DefaultRoadStyle))) &&
-			(!(bLandscapeSplinesOnly || bGenerateLandscapeSplinesWithRoads) || (IsValid(TargetLandscape) && TargetLandscape->GetLandscapeInfo()));
+		return IsValid(OsmRoadImporter) && IsValid(DefaultRoadStyle);
 	});
 	if (!bConfigured)
 	{
-		UE_LOG(LogRoadConstructorImport, Error, TEXT("Select an OSMRoadImporter with cached data and RoadStyle for roads, or generate roads first for Terrain Deform. A loaded Target Landscape is required for deformation."));
+		UE_LOG(LogRoadConstructorImport, Error, TEXT("Select an OSMRoadImporter with cached data and a RoadStyle."));
 		return false;
 	}
-	if (bLandscapeSplinesOnly)
-		return Concurrency::RunOnGameThreadAndWait([this]() { return BuildLandscapeSplines(GeneratedScene.Get()); });
 	TArray<FImportedRoadWay> Ways;
-	if (!OSMRoadImporter->GetCachedRoadData(Ways)) return false;
+	if (!OsmRoadImporter->GetCachedRoadData(Ways)) return false;
 	return Concurrency::RunOnGameThreadAndWait([&]()
 	{
 		return BuildRoads(Ways, SpawnedActorsPathOverride);
@@ -513,31 +838,38 @@ bool ARoadGenerator::OnGenerate(FName SpawnedActorsPathOverride, bool bIsUserIni
 #endif
 }
 
-bool ARoadGenerator::BuildRoads(const TArray<FImportedRoadWay>& Ways, FName OutputFolderPath)
+bool ARoadGenerator::BuildRoads(const TArray<FImportedRoadWay>& Ways, const FName OutputFolderPath)
 {
 #if WITH_EDITOR
 	if (!GeneratedScene.IsNull() && !GeneratedScene.IsValid())
 	{
-		UE_LOG(LogRoadConstructorImport, Error, TEXT("Load the previous generated scene before replacing it."));
+		UE_LOG(LogRoadConstructorImport, Error, TEXT("Load the previous road scene before replacing roads."));
 		return false;
 	}
-	if (!FMath::IsFinite(SurfaceOffsetCm) || !FMath::IsFinite(LandscapeHeightOffsetCm) ||
+	if (!FMath::IsFinite(SurfaceOffsetCm) ||
 		!FMath::IsFinite(RoadCurveRadiusCm) || !FMath::IsFinite(JunctionMergeDistanceCm)) return false;
 	if (bOverrideJunctionRadius && !FMath::IsFinite(JunctionRadiusCm)) return false;
 	if (!FMath::IsFinite(StraightConnectionToleranceDegrees)) return false;
-	const double RoadHeightOffset = LandscapeHeightOffsetCm + SurfaceOffsetCm;
+	const double RoadHeightOffset = SurfaceOffsetCm;
 	if (!FMath::IsFinite(RoadHeightOffset)) return false;
-	TArray<FImportSpan> Spans = PrepareSpans(Ways, HighwayFilter, bRequireTerrainSamples, RoadHeightOffset, JunctionMergeDistanceCm);
-	auto ResolveStyle = [this](FName Highway) -> URoadStyle*
+	const FName EffectiveFolder = OutputFolderPath.IsNone() ? GetFolderPath() : OutputFolderPath;
+	const FString RoadInputs = RoadGenerationSignatures::RoadInputs(*this, Ways, EffectiveFolder);
+	const FString CurrentRoadOutput = !CachedRoadOutput.IsEmpty() && CachedRoadInputs == RoadInputs
+		? RoadGenerationSignatures::RoadOutput(GeneratedScene.Get()) : FString();
+	if (!CachedRoadOutput.IsEmpty() && CachedRoadInputs == RoadInputs && CachedRoadOutput == CurrentRoadOutput)
 	{
-		const TObjectPtr<URoadStyle>* Override = HighwayStyles.Find(Highway);
-		return Override && IsValid(Override->Get()) ? Override->Get() : DefaultRoadStyle.Get();
-	};
-	const int32 MergeCount = bMergeStraightRoads ? MergeStraightSpans(Spans, StraightConnectionToleranceDegrees, ResolveStyle) : 0;
-	UE_LOG(LogRoadConstructorImport, Display, TEXT("Merged %d compatible straight two-arm connections before actor creation; %d road spans remain."), MergeCount, Spans.Num());
+		UE_LOG(LogRoadConstructorImport, Display, TEXT("Road inputs and output are unchanged; skipped road generation and junction solving."));
+		return true;
+	}
+	UE_LOG(LogRoadConstructorImport, Display, TEXT("Regenerating roads: %s."),
+		CachedRoadInputs.IsEmpty() ? TEXT("no successful baseline in this session") :
+		CachedRoadInputs != RoadInputs ? TEXT("source data or settings changed") : TEXT("generated output changed or is missing"));
+	TArray<FImportSpan> Spans = PrepareSpans(Ways, HighwayFilter, bRequireTerrainSamples, RoadHeightOffset,
+	                                         JunctionMergeDistanceCm);
 	if (Spans.IsEmpty())
 	{
-		UE_LOG(LogRoadConstructorImport, Error, TEXT("The cache contains no usable ground roads for the selected filter. Previous output was kept."));
+		UE_LOG(LogRoadConstructorImport, Error,
+		       TEXT("The cache contains no usable roads for the selected filter. Previous output was kept."));
 		return false;
 	}
 	FActorSpawnParameters Params;
@@ -547,14 +879,31 @@ bool ARoadGenerator::BuildRoads(const TArray<FImportedRoadWay>& Ways, FName Outp
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	AOsmRoadScene* Candidate = GetWorld()->SpawnActor<AOsmRoadScene>(FVector::ZeroVector, FRotator::ZeroRotator, Params);
 	if (!Candidate) return false;
+	Candidate->bPreparingImportedRoads = true;
+	Candidate->ImportedSurfaceOffsetCm = SurfaceOffsetCm;
+	auto resolve_style = [this, Candidate](const FImportSpan& Span) -> URoadStyle*
+	{
+		if (const TObjectPtr<URoadStyle>* Existing = Candidate->ImportedWayStyles.Find(Span.WayId)) return Existing->Get();
+		const TObjectPtr<URoadStyle>* Override = HighwayStyles.Find(Span.Highway);
+		const URoadStyle* Base = Override && IsValid(Override->Get()) ? Override->Get() : DefaultRoadStyle.Get();
+		URoadStyle* Style = CreateLaneCountStyle(Candidate, Base, Span.LaneCount);
+		Candidate->ImportedWayStyles.Add(Span.WayId, Style);
+		return Style;
+	};
+	const int32 MergeCount = bMergeStraightRoads
+		                         ? MergeStraightSpans(Spans, StraightConnectionToleranceDegrees, resolve_style)
+		                         : 0;
+	UE_LOG(LogRoadConstructorImport, Display,
+	       TEXT("Merged %d compatible straight two-arm connections before actor creation; %d road spans remain."),
+	       MergeCount, Spans.Num());
 	Candidate->bOverrideJunctionRadius = bOverrideJunctionRadius;
 	if (bOverrideJunctionRadius) Candidate->ImportedJunctionRadius = FMath::Max(0.0, JunctionRadiusCm);
 	Candidate->bCleanJunctionApproaches = bCleanJunctionApproaches;
 	Candidate->bRemoveCornersWithoutJunctionSurface = bRemoveCornersWithoutJunctionSurface;
 	Candidate->SetActorLabel(GetActorLabel() + TEXT("_RoadConstructor"));
-	const FName EffectiveFolder = OutputFolderPath.IsNone() ? GetFolderPath() : OutputFolderPath;
 	Candidate->SetFolderPath(EffectiveFolder);
-	FScopedSlowTask Progress(Spans.Num() + 1, NSLOCTEXT("Landscapes", "ImportRoadConstructor", "Generating Road Constructor roads"));
+	FScopedSlowTask Progress(Spans.Num() + 1,
+	                         NSLOCTEXT("Landscapes", "ImportRoadConstructor", "Generating Road Constructor roads"));
 	Progress.MakeDialog(false);
 	for (int32 Index = 0; Index < Spans.Num(); ++Index)
 	{
@@ -569,133 +918,39 @@ bool ARoadGenerator::BuildRoads(const TArray<FImportedRoadWay>& Ways, FName Outp
 		}
 		Road->AttachToActor(Candidate, FAttachmentTransformRules::KeepWorldTransform);
 		Candidate->Roads.Add(Road);
-		Road->InitWithStyle(ResolveStyle(Span.Highway), Span.Positions[0].Z);
+		Road->InitWithStyle(resolve_style(Span), Span.Positions[0].Z);
 		Road->bHasGround = false; // Terrain remains Landscape Combinator's responsibility.
 		Road->ImportedPositions = Span.Positions;
 		Road->ImportedCurveRadius = FMath::Clamp(RoadCurveRadiusCm, 1.0, 5000000.0);
 		Road->StartNodeKey = Span.StartKey;
 		Road->EndNodeKey = Span.EndKey;
 		Road->Tags.AddUnique(TEXT("RC_DisableLegacyHighwaySideConnector"));
-		for (int64 WayId : Span.SourceWayIds) Road->Tags.AddUnique(FName(*FString::Printf(TEXT("OSMWay_%lld"), WayId)));
+		for (const int64 WayId : Span.SourceWayIds) Road->Tags.AddUnique(FName(*FString::Printf(TEXT("OSMWay_%lld"), WayId)));
 		Road->SetActorLabel(FString::Printf(TEXT("OSM_%lld_%d"), Span.WayId, Index));
 		Road->SetFolderPath(EffectiveFolder);
 	}
 	Progress.EnterProgressFrame(1);
+	Candidate->bPreparingImportedRoads = false;
 	if (!Candidate->BuildImportedNetwork())
 	{
 		Candidate->Destroy();
 		return false;
 	}
-	if (bGenerateLandscapeSplinesWithRoads && !BuildLandscapeSplines(Candidate))
-	{
-		RemoveRoadConstructorSplines(Candidate, TargetLandscape);
-		Candidate->Destroy();
-		return false;
-	}
-	// Publish only after the replacement has built successfully.
-	if (GeneratedScene.IsValid() && GeneratedSplineLandscape.IsValid())
-		RemoveRoadConstructorSplines(GeneratedScene.Get(), GeneratedSplineLandscape.Get());
+	// Preserve the independently generated Landscape output and its ownership.
+	RememberLandscapeSplineOwnership();
 	if (GeneratedScene.IsValid()) GeneratedScene->Destroy();
-	if (GeneratedLandscapeSplineActor.IsValid()) GeneratedLandscapeSplineActor->Destroy();
 	Modify();
 	GeneratedScene = Candidate;
-	GeneratedLandscapeSplineActor.Reset();
-	GeneratedSplineLandscape = bGenerateLandscapeSplinesWithRoads && bDeformLandscape ? TargetLandscape : nullptr;
-	Candidate->MarkPackageDirty();
-	MarkPackageDirty();
-	UE_LOG(LogRoadConstructorImport, Display, TEXT("Road Constructor generated from the OSMRoadImporter cache. Bridges, tunnels and nonzero layers were excluded. Styles supply widths and sidewalks."));
+	CachedRoadInputs = RoadInputs;
+	CachedRoadOutput = Candidate->LastBuiltOutputSignature;
+	[[maybe_unused]] bool SceneMarked = Candidate->MarkPackageDirty();
+	[[maybe_unused]] bool Marked = MarkPackageDirty();
+	UE_LOG(LogRoadConstructorImport, Display,
+	       TEXT(
+		       "Road Constructor generated from the OSMRoadImporter cache using Highway Filter. Styles supply widths and sidewalks."
+	       ));
 	return true;
 #else
 	return false;
 #endif
 }
-
-#if WITH_DEV_AUTOMATION_TESTS
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRoadConstructorImportTopologyTest, "Landscapes.RoadConstructor.ImportTopology", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-bool FRoadConstructorImportTopologyTest::RunTest(const FString& Parameters)
-{
-	auto MakeWay = [](int64 Id, std::initializer_list<FImportedRoadPoint> Points)
-	{
-		FImportedRoadWay Way;
-		Way.WayId = Id;
-		Way.Tags.Add(TEXT("highway"), TEXT("residential"));
-		for (const FImportedRoadPoint& Point : Points) Way.Points.Add(Point);
-		return Way;
-	};
-	FImportedRoadWay Main = MakeWay(1, {{ 10, FVector(-5000, 0, 100), true }, { 11, FVector(0, 0, 200), true }, { 12, FVector(5000, 0, 300), true }});
-	FImportedRoadWay Branch = MakeWay(2, {{ 11, FVector(0, 0, 200), true }, { 13, FVector(0, 5000, 400), true }});
-	TArray<FImportSpan> Spans = PrepareSpans({ Main, Branch }, {}, true, 5.0);
-	TestEqual(TEXT("T junction splits the through way"), Spans.Num(), 3);
-	if (Spans.Num() == 3)
-	{
-		TestEqual(TEXT("All arms retain one shared node key"), Spans[0].EndKey, Spans[2].StartKey);
-		TestEqual(TEXT("Both halves meet at the same node"), Spans[1].StartKey, Spans[2].StartKey);
-		TestEqual(TEXT("Elevation offset is applied once"), Spans[0].Positions.Last().Z, 205.0);
-	}
-	Branch.Points[0].NodeId = 99;
-	TestEqual(TEXT("Same position with a different node ID is not a junction"), PrepareSpans({ Main, Branch }, {}, true, 0).Num(), 2);
-	Branch.Tags.Add(TEXT("bridge"), TEXT("yes"));
-	TestEqual(TEXT("Bridge is excluded before connectivity is calculated"), PrepareSpans({ Main, Branch }, {}, true, 0).Num(), 1);
-	Main.Points[1].bHasTerrain = false;
-	TestEqual(TEXT("Missing terrain does not create a spanning road"), PrepareSpans({ Main }, {}, true, 0).Num(), 0);
-	TestEqual(TEXT("Terrain requirement can be disabled"), PrepareSpans({ Main }, {}, false, 0).Num(), 1);
-	FImportedRoadWay Loop = MakeWay(3, {{ 20, FVector(0, 0, 0), true }, { 21, FVector(5000, 0, 0), true }, { 22, FVector(5000, 5000, 0), true }, { 20, FVector(0, 0, 0), true }});
-	TestEqual(TEXT("Closed way uses two distinct native roads"), PrepareSpans({ Loop }, {}, true, 0).Num(), 2);
-	FImportedRoadWay Connector = MakeWay(4, {{ 30, FVector(0, 0, 0), true }, { 31, FVector(500, 0, 0), true }});
-	FImportedRoadWay CrossA = MakeWay(5, {{ 32, FVector(0, -5000, 0), true }, { 30, FVector(0, 0, 0), true }, { 33, FVector(0, 5000, 0), true }});
-	FImportedRoadWay CrossB = MakeWay(6, {{ 34, FVector(500, -5000, 0), true }, { 31, FVector(500, 0, 0), true }, { 35, FVector(500, 5000, 0), true }});
-	Spans = PrepareSpans({ Connector, CrossA, CrossB }, {}, true, 0);
-	TestEqual(TEXT("Short junction connector is contracted"), Spans.Num(), 4);
-	if (Spans.Num() == 4) TestEqual(TEXT("Contracted nodes share connectivity"), Spans[0].EndKey, Spans[2].EndKey);
-	TestEqual(TEXT("Contraction can be disabled"), PrepareSpans({ Connector, CrossA, CrossB }, {}, true, 0, 0).Num(), 5);
-
-	FImportedRoadWay StraightA = MakeWay(100, {{ 1000, FVector(0, 0, 0), true }, { 1001, FVector(5000, 0, 0), true }});
-	FImportedRoadWay StraightB = MakeWay(101, {{ 1001, FVector(5000, 0, 0), true }, { 1002, FVector(10000, 0, 0), true }});
-	FImportedRoadWay StraightC = MakeWay(102, {{ 1003, FVector(15000, 0, 0), true }, { 1002, FVector(10000, 0, 0), true }});
-	auto SameStyle = [](FName) -> URoadStyle* { return nullptr; };
-	Spans = PrepareSpans({ StraightA, StraightB, StraightC }, {}, true, 0, 0);
-	TestEqual(TEXT("Straight chain merges regardless of endpoint order"), MergeStraightSpans(Spans, 10, SameStyle), 2);
-	TestEqual(TEXT("Chain becomes one actor input"), Spans.Num(), 1);
-	if (Spans.Num() == 1)
-	{
-		TestEqual(TEXT("Shared samples appear once, with all original controls retained"), Spans[0].Positions.Num(), 4);
-		TestEqual(TEXT("All original OSM way IDs are retained"), Spans[0].SourceWayIds.Num(), 3);
-		TestTrue(TEXT("Merged ends are the original outer nodes"),
-			(Spans[0].StartKey == TEXT("1000:0") && Spans[0].EndKey == TEXT("1003:0")) ||
-			(Spans[0].EndKey == TEXT("1000:0") && Spans[0].StartKey == TEXT("1003:0")));
-	}
-	StraightB.Points.Last().WorldLocation = FVector(5000, 5000, 0);
-	Spans = PrepareSpans({ StraightA, StraightB }, {}, true, 0, 0);
-	TestEqual(TEXT("90 degree connection stays a corner junction"), MergeStraightSpans(Spans, 10, SameStyle), 0);
-	StraightB.Points.Last().WorldLocation = FVector(10000, 400, 0);
-	Spans = PrepareSpans({ StraightA, StraightB }, {}, true, 0, 0);
-	TestEqual(TEXT("Small deviation inside tolerance merges"), MergeStraightSpans(Spans, 10, SameStyle), 1);
-	Spans = PrepareSpans({ StraightA, StraightB }, {}, true, 0, 0);
-	TestEqual(TEXT("Stricter angle tolerance preserves the connection"), MergeStraightSpans(Spans, 1, SameStyle), 0);
-	StraightB.Points.Last().WorldLocation = FVector(10000, 0, 0);
-	FImportedRoadWay ThirdArm = MakeWay(103, {{ 1001, FVector(5000, 0, 0), true }, { 1004, FVector(5000, 5000, 0), true }});
-	Spans = PrepareSpans({ StraightA, StraightB, ThirdArm }, {}, true, 0, 0);
-	TestEqual(TEXT("A branch prevents merging the two opposite arms"), MergeStraightSpans(Spans, 10, SameStyle), 0);
-	URoadStyle* StyleA = NewObject<URoadStyle>();
-	URoadStyle* StyleB = NewObject<URoadStyle>();
-	StraightB.Tags.Add(TEXT("highway"), TEXT("primary"));
-	auto DifferentStyles = [&](FName Highway) { return Highway == TEXT("primary") ? StyleB : StyleA; };
-	Spans = PrepareSpans({ StraightA, StraightB }, {}, true, 0, 0);
-	TestEqual(TEXT("Different selected styles remain separate"), MergeStraightSpans(Spans, 10, DifferentStyles), 0);
-	// Empty override entries and different highway tags may still resolve to one asset.
-	Spans = PrepareSpans({ StraightA, StraightB }, {}, true, 0, 0);
-	TestEqual(TEXT("Different highway tags merge when their resolved style is identical"), MergeStraightSpans(Spans, 10, SameStyle), 1);
-	StyleA->LeftLanes.SetNum(1);
-	StyleA->RightLanes.Reset();
-	Spans = PrepareSpans({ StraightA, StraightB }, {}, true, 0, 0);
-	Algo::Reverse(Spans[1].Positions);
-	Swap(Spans[1].StartKey, Spans[1].EndKey);
-	TestEqual(TEXT("Reversal cannot swap an asymmetric lane layout"), MergeStraightSpans(Spans, 10, [&](FName) { return StyleA; }), 0);
-	Spans = PrepareSpans({ StraightA, StraightB }, {}, true, 0, 0);
-	Spans[1].Positions[0].Z += 2;
-	TestEqual(TEXT("Separated elevations at aliased nodes cannot be joined"), MergeStraightSpans(Spans, 10, SameStyle), 0);
-	Spans = PrepareSpans({ Loop }, {}, true, 0, 0);
-	TestEqual(TEXT("Merging cannot turn split loops into unsupported same-road junctions"), MergeStraightSpans(Spans, 45, SameStyle), 0);
-	return true;
-}
-#endif

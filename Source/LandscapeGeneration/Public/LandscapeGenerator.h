@@ -1,8 +1,6 @@
-// Copyright 2023-2025 LandscapeCombinator. All Rights Reserved.
-
 #pragma once
 
-#include "MapDowloader.h"
+#include "MapDownloader.h"
 #include "ConcurrencyHelpers/Concurrency.h"
 #include "LCCommon/LCGenerator.h"
 #include "LCCommon/ActorSelection.h"
@@ -286,10 +284,10 @@ public:
 		DuplicateTransient, VisibleAnywhere, BlueprintReadWrite, Category = "LandscapeSpawner",
 		meta = (DisplayPriority = "10", ShowOnlyInnerProperties)
 	)
-	TObjectPtr<UMapDowloader> HeightmapDownloader = nullptr;
+	TObjectPtr<UMapDownloader> HeightmapDownloader = nullptr;
 	
 	UPROPERTY(BlueprintReadWrite, Category = "LandscapeSpawner")
-	TObjectPtr<UMapDowloader> DecalDownloader = nullptr;
+	TObjectPtr<UMapDownloader> DecalDownloader = nullptr;
 
 	UPROPERTY(
 		VisibleAnywhere, BlueprintReadWrite, Category = "LandscapeSpawner",

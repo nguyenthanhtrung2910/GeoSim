@@ -1,8 +1,7 @@
 // Copyright 2023-2025 LandscapeCombinator. All Rights Reserved.
 
-#include "MapDowloader.h"
+#include "MapDownloader.h"
 #include "LogLandscapeGeneration.h"
-#include "ImageDownloader/Directories.h"
 #include "ImageDownloader/HMDebugFetcher.h"
 
 #include "ImageDownloader/Downloaders/HMLocalFile.h"
@@ -10,7 +9,6 @@
 #include "ImageDownloader/Downloaders/HMURL.h"
 
 #include "ImageDownloader/Downloaders/HMLitto3DGuadeloupe.h"
-#include "ImageDownloader/Downloaders/HMViewfinder15Downloader.h"
 #include "ImageDownloader/Downloaders/HMViewfinderDownloader.h"
 #include "ImageDownloader/Downloaders/HMListDownloader.h"
 #include "HMWorldElevation3D.h"
@@ -29,7 +27,6 @@
 #include "ImageDownloader/Transformers/HMReproject.h"
 #include "ImageDownloader/Transformers/HMEnsureOneBand.h"
 #include "ImageDownloader/Transformers/HMCrop.h"
-#include "ImageDownloader/Transformers/HMResolution.h"
 #include "ImageDownloader/Transformers/HMPercentResolution.h"
 #include "ImageDownloader/Transformers/HMToPNG.h"
 #include "ImageDownloader/Transformers/HMMerge.h"
@@ -39,13 +36,10 @@
 #include "ImageDownloader/Transformers/HMFunction.h"
 
 #include "LCCommon/LCSettings.h"
-#include "Coordinates/LevelCoordinates.h"
 #include "LandscapeUtils/LandscapeUtils.h"
-#include "ConcurrencyHelpers/Concurrency.h"
 #include "ConcurrencyHelpers/LCReporter.h"
 
 #include "Engine/World.h"
-#include "HAL/FileManagerGeneric.h"
 #include "Misc/MessageDialog.h"
 #include "Logging/StructuredLog.h"
 #include "Internationalization/TextLocalizationResource.h" 
@@ -53,12 +47,12 @@
 #define LOCTEXT_NAMESPACE "FLandscapeGenerationModule"
 
 
-UMapDowloader::UMapDowloader()
+UMapDownloader::UMapDownloader()
 {
 	PreprocessingTool = CreateDefaultSubobject<UExternalTool>(TEXT("Preprocessing Tool"));
 }
 
-bool UMapDowloader::ConfigureForTiles(int Zoom, int MinX, int MaxX, int MinY, int MaxY)
+bool UMapDownloader::ConfigureForTiles(const int Zoom, const int MinX, const int MaxX, const int MinY, const int MaxY)
 {
 	if (IsXYZ() || IsWorldElevation3D())
 	{
@@ -77,9 +71,9 @@ bool UMapDowloader::ConfigureForTiles(int Zoom, int MinX, int MaxX, int MinY, in
 		GDALInterface::XYZTileToEPSG3857(MaxX + 1, MaxY + 1, Zoom, MaxLong3857, MinLat3857);
 
 		FVector4d Coordinates3857(MinLong3857, MaxLong3857, MinLat3857, MaxLat3857);
-		FVector4d CoordinatesWMS;
+		FVector4d CoordinatesWms;
 
-		if (!GDALInterface::ConvertCoordinates(Coordinates3857, /*bCrop=*/false, CoordinatesWMS, "EPSG:3857", WMS_CRS))
+		if (!GDALInterface::ConvertCoordinates(Coordinates3857, /*bCrop=*/false, CoordinatesWms, "EPSG:3857", WMS_CRS))
 		{
 			LCReporter::ShowError(
 				FText::Format(
@@ -93,17 +87,17 @@ bool UMapDowloader::ConfigureForTiles(int Zoom, int MinX, int MaxX, int MinY, in
 			return false;
 		}
 
-		WMS_MinLong = CoordinatesWMS[0];
-		WMS_MaxLong = CoordinatesWMS[1];
-		WMS_MinLat  = CoordinatesWMS[2];
-		WMS_MaxLat  = CoordinatesWMS[3];
+		WMS_MinLong = CoordinatesWms[0];
+		WMS_MaxLong = CoordinatesWms[1];
+		WMS_MinLat  = CoordinatesWms[2];
+		WMS_MaxLat  = CoordinatesWms[3];
 
 		ParametersSelection.ParametersSelectionMethod = EParametersSelectionMethod::Manual;
 		return true;
 	}
 	else
 	{
-		FString SourceName = StaticEnum<ELandscapeImageSourceKind>()->GetDisplayNameTextByValue((int64)ImageSourceKind).ToString();
+		const FString SourceName = StaticEnum<ELandscapeImageSourceKind>()->GetDisplayNameTextByValue(static_cast<int64>(ImageSourceKind)).ToString();
 
 		LCReporter::ShowError(
 			FText::Format(
@@ -119,28 +113,28 @@ bool UMapDowloader::ConfigureForTiles(int Zoom, int MinX, int MaxX, int MinY, in
 	}
 }
 
-static FString RenameGenerationCRS(FString CRS)
+[[maybe_unused]] static FString RenameGenerationCrs(FString Crs)
 {
-	if (CRS == "IGNF:UTM20W84GUAD")
+	if (Crs == "IGNF:UTM20W84GUAD")
 	{
 		return "EPSG:4559";
 	}
-	else if (CRS == "IGNF:RGR92UTM40S")
+	else if (Crs == "IGNF:RGR92UTM40S")
 	{
 		return "EPSG:2975";
 	}
 	else
 	{
-		return CRS;
+		return Crs;
 	}
 }
 
-TArray<FString> UMapDowloader::GetTitles()
+TArray<FString> UMapDownloader::GetTitles()
 {
 	return WMS_Provider.Titles;
 }
 
-HMFetcher* UMapDowloader::CreateInitialFetcher(bool bIsUserInitiated, FString Name)
+HMFetcher* UMapDownloader::CreateInitialFetcher(bool bIsUserInitiated, FString Name)
 {
 	switch (ImageSourceKind)
 	{
@@ -418,7 +412,7 @@ HMFetcher* UMapDowloader::CreateInitialFetcher(bool bIsUserInitiated, FString Na
 				LCReporter::ShowError(
 					FText::Format(
 						LOCTEXT("InterfaceFromKindError", "Internal error: heightmap kind '{0}' is not supprted."),
-						FText::AsNumber((int) ImageSourceKind)
+						FText::AsNumber(static_cast<int>(ImageSourceKind))
 					)
 				); 
 				return nullptr;
@@ -427,10 +421,10 @@ HMFetcher* UMapDowloader::CreateInitialFetcher(bool bIsUserInitiated, FString Na
 	}
 }
 
-HMFetcher* UMapDowloader::CreateFetcher(
-	bool bIsUserInitiated, FString Name, bool bEnsureOneBand, bool bScaleAltitude,
-	bool bConvertToPNG, bool bConvertFirstOnly, bool bAddMissingTiles,
-	TFunction<bool(HMFetcher*)> RunBeforePNG, TObjectPtr<UGlobalCoordinates> GlobalCoordinates
+HMFetcher* UMapDownloader::CreateFetcher(
+	const bool bIsUserInitiated, const FString& Name, const bool bEnsureOneBand, const bool bScaleAltitude,
+	const bool bConvertToPNG, const bool bConvertFirstOnly, const bool bAddMissingTiles,
+	const TFunction<bool(HMFetcher*)>& RunBeforePNG, const TObjectPtr<UGlobalCoordinates> GlobalCoordinates
 )
 {
 	HMFetcher *Result = CreateInitialFetcher(bIsUserInitiated, Name);
@@ -465,7 +459,7 @@ HMFetcher* UMapDowloader::CreateFetcher(
 #if WITH_EDITOR
 	if (bAdaptResolution)
 	{
-		FIntPoint ImageSize(0, 0);
+		FIntPoint ImageSize;
 		if (!IsValid(TargetLandscape))
 		{
 			LCReporter::ShowError(
@@ -528,25 +522,24 @@ HMFetcher* UMapDowloader::CreateFetcher(
 	return Result;
 }
 
-bool UMapDowloader::HasMapTilerToken()
+bool UMapDownloader::HasMapTilerToken()
 {
 	return !GetDefault<ULCSettings>()->MapTiler_Token.IsEmpty();
 }
 
-bool UMapDowloader::HasMapboxToken()
+bool UMapDownloader::HasMapboxToken()
 {
 	return !GetDefault<ULCSettings>()->Mapbox_Token.IsEmpty();
 }
 
-bool UMapDowloader::HasNextZenToken()
+bool UMapDownloader::HasNextZenToken()
 {
 	return !GetDefault<ULCSettings>()->NextZen_Token.IsEmpty();
 }
 
-FString UMapDowloader::GetMapTilerToken()
+FString UMapDownloader::GetMapTilerToken() const
 {
-	FString ProjectSettingsMapTilerToken = GetDefault<ULCSettings>()->MapTiler_Token;
-	if (!ProjectSettingsMapTilerToken.IsEmpty())
+	if (const FString ProjectSettingsMapTilerToken = GetDefault<ULCSettings>()->MapTiler_Token; !ProjectSettingsMapTilerToken.IsEmpty())
 	{
 		return ProjectSettingsMapTilerToken.TrimStartAndEnd();
 	}
@@ -556,10 +549,9 @@ FString UMapDowloader::GetMapTilerToken()
 	}
 }
 
-FString UMapDowloader::GetMapboxToken()
+FString UMapDownloader::GetMapboxToken() const
 {
-	FString ProjectSettingsMapboxToken = GetDefault<ULCSettings>()->Mapbox_Token;
-	if (!ProjectSettingsMapboxToken.IsEmpty())
+	if (const FString ProjectSettingsMapboxToken = GetDefault<ULCSettings>()->Mapbox_Token; !ProjectSettingsMapboxToken.IsEmpty())
 	{
 		return ProjectSettingsMapboxToken.TrimStartAndEnd();
 	}
@@ -569,10 +561,10 @@ FString UMapDowloader::GetMapboxToken()
 	}
 }
 
-FString UMapDowloader::GetNextZenToken()
+FString UMapDownloader::GetNextZenToken()
 {
-	FString ProjectSettingsNextZenToken = GetDefault<ULCSettings>()->NextZen_Token;
-	if (!ProjectSettingsNextZenToken.IsEmpty())
+	if (FString ProjectSettingsNextZenToken = GetDefault<ULCSettings>()->NextZen_Token; !ProjectSettingsNextZenToken.
+		IsEmpty())
 	{
 		return ProjectSettingsNextZenToken;
 	}
@@ -582,7 +574,7 @@ FString UMapDowloader::GetNextZenToken()
 	}
 }
 
-bool UMapDowloader::IsWms()
+bool UMapDownloader::IsWms() const
 {
 	return
 		ImageSourceKind == ELandscapeImageSourceKind::GenericWMS ||
@@ -595,7 +587,7 @@ bool UMapDowloader::IsWms()
 		ImageSourceKind == ELandscapeImageSourceKind::USGS_3DEPElevation;
 }
 
-bool UMapDowloader::IsMapbox()
+bool UMapDownloader::IsMapbox() const
 {
 	return
 		ImageSourceKind == ELandscapeImageSourceKind::Mapbox_Heightmaps ||
@@ -603,7 +595,7 @@ bool UMapDowloader::IsMapbox()
 
 }
 
-bool UMapDowloader::IsMapTiler()
+bool UMapDownloader::IsMapTiler() const
 {
 	return
 		ImageSourceKind == ELandscapeImageSourceKind::MapTiler_Heightmaps ||
@@ -611,28 +603,28 @@ bool UMapDowloader::IsMapTiler()
 
 }
 
-bool UMapDowloader::IsNextZen()
+bool UMapDownloader::IsNextZen() const
 {
 	return ImageSourceKind == ELandscapeImageSourceKind::NextZen_Heightmaps;
 }
 
-bool UMapDowloader::IsWorldElevation3D() const
+bool UMapDownloader::IsWorldElevation3D() const
 {
 	return ImageSourceKind == ELandscapeImageSourceKind::ArcGIS_WorldElevation3D;
 }
 
-bool UMapDowloader::IsXYZ()
+bool UMapDownloader::IsXYZ() const
 {
 	return IsMapbox() || IsMapTiler() || IsNextZen()
 		|| ImageSourceKind == ELandscapeImageSourceKind::GenericXYZ;
 }
 
-bool UMapDowloader::HasMultipleLayers()
+bool UMapDownloader::HasMultipleLayers() const
 {
 	return WMS_Provider.Titles.Num() >= 2;
 }
 
-void UMapDowloader::SetLargestPossibleCoordinates()
+void UMapDownloader::SetLargestPossibleCoordinates()
 {
 	WMS_MinLong = WMS_MinAllowedLong;
 	WMS_MinLat = WMS_MinAllowedLat;
@@ -640,23 +632,23 @@ void UMapDowloader::SetLargestPossibleCoordinates()
 	WMS_MaxLat = WMS_MaxAllowedLat;
 }
 
-void UMapDowloader::SetSourceParameters()
+void UMapDownloader::SetSourceParameters()
 {
 	SetSourceParametersBool(true);
 }
 
-bool UMapDowloader::AllowsParametersSelection()
+bool UMapDownloader::AllowsParametersSelection() const
 {
 	return IsWms() || ((IsXYZ() || IsWorldElevation3D()) && bGeoreferenceSlippyTiles)
 		|| ImageSourceKind == ELandscapeImageSourceKind::Napoli;
 }
 
-bool UMapDowloader::CanAutoSetResolution()
+bool UMapDownloader::CanAutoSetResolution() const
 {
 	return ImageSourceKind == ELandscapeImageSourceKind::IGN_Heightmaps;
 }
 
-void UMapDowloader::AutoSetResolution()
+void UMapDownloader::AutoSetResolution()
 {
 	if (ImageSourceKind == ELandscapeImageSourceKind::IGN_Heightmaps)
 	{
@@ -668,7 +660,7 @@ void UMapDowloader::AutoSetResolution()
 	}
 }
 
-bool UMapDowloader::SetSourceParametersBool(bool bDialog)
+bool UMapDownloader::SetSourceParametersBool(bool bDialog)
 {
 	if (ParametersSelection.ParametersSelectionMethod == EParametersSelectionMethod::Manual) return true;
 
@@ -704,7 +696,7 @@ bool UMapDowloader::SetSourceParametersBool(bool bDialog)
 	}
 }
 
-bool UMapDowloader::SetSourceParametersFromEpsg4326Coordinates(bool bDialog)
+bool UMapDownloader::SetSourceParametersFromEpsg4326Coordinates(bool bDialog)
 {
 	FVector4d Coordinates = UGlobalCoordinates::GetCoordinatesFromSize(ParametersSelection.Longitude, ParametersSelection.Latitude, ParametersSelection.RealWorldWidth, ParametersSelection.RealWorldHeight);
 	ParametersSelection.MinLong = Coordinates[0];
@@ -714,7 +706,7 @@ bool UMapDowloader::SetSourceParametersFromEpsg4326Coordinates(bool bDialog)
 	return SetSourceParametersFromEpsg4326Box(bDialog);
 }
 
-bool UMapDowloader::SetSourceParametersFromEpsg4326Box(bool bDialog)
+bool UMapDownloader::SetSourceParametersFromEpsg4326Box(bool bDialog)
 {
 	if (ImageSourceKind == ELandscapeImageSourceKind::Napoli)
 	{
@@ -752,9 +744,9 @@ bool UMapDowloader::SetSourceParametersFromEpsg4326Box(bool bDialog)
 	}
 	else if ((IsXYZ() || IsWorldElevation3D()) && bGeoreferenceSlippyTiles)
 	{
-		double MinLatRad = FMath::DegreesToRadians(ParametersSelection.MinLat);
-		double MaxLatRad = FMath::DegreesToRadians(ParametersSelection.MaxLat);
-		double n = 1 << XYZ_Zoom;
+		const double MinLatRad = FMath::DegreesToRadians(ParametersSelection.MinLat);
+		const double MaxLatRad = FMath::DegreesToRadians(ParametersSelection.MaxLat);
+		const double n = 1 << XYZ_Zoom;
 		XYZ_MinX = (ParametersSelection.MinLong + 180) / 360 * n;
 		XYZ_MaxX = (ParametersSelection.MaxLong + 180) / 360 * n;
 		
@@ -770,7 +762,7 @@ bool UMapDowloader::SetSourceParametersFromEpsg4326Box(bool bDialog)
 }
 
 
-bool UMapDowloader::SetSourceParametersFromActor(bool bDialog)
+bool UMapDownloader::SetSourceParametersFromActor(bool bDialog)
 {
 	FVector4d Coordinates;
 
@@ -785,22 +777,22 @@ bool UMapDowloader::SetSourceParametersFromActor(bool bDialog)
 
 	UE_LOG(LogLandscapeGeneration, Log, TEXT("Set Source Parameters From Actor %s"), *ParametersSelection.ParametersBoundingActor->GetActorNameOrLabel());
 
-	FString SourceCRS = "";
+	FString SourceCrs = "";
 	
 	if (ImageSourceKind == ELandscapeImageSourceKind::Napoli)
 	{
-		SourceCRS = "EPSG:32633";
+		SourceCrs = "EPSG:32633";
 	}
 	else if (IsWms())
 	{
-		SourceCRS = WMS_CRS;
+		SourceCrs = WMS_CRS;
 	}
 	else if ((IsXYZ() || IsWorldElevation3D()) && bGeoreferenceSlippyTiles)
 	{
-		SourceCRS = "EPSG:3857";
+		SourceCrs = "EPSG:3857";
 	}
 
-	if (SourceCRS.IsEmpty())
+	if (SourceCrs.IsEmpty())
 	{
 		if (bDialog)
 		{
@@ -812,7 +804,7 @@ bool UMapDowloader::SetSourceParametersFromActor(bool bDialog)
 		return false;
 	}
 
-	if (!LandscapeUtils::GetActorCRSBounds(ParametersSelection.ParametersBoundingActor, SourceCRS, Coordinates))
+	if (!LandscapeUtils::GetActorCRSBounds(ParametersSelection.ParametersBoundingActor, SourceCrs, Coordinates))
 	{
 		if (bDialog)
 		{
@@ -823,11 +815,11 @@ bool UMapDowloader::SetSourceParametersFromActor(bool bDialog)
 		}
 		return false;
 	}
-	
-	double ActorMinLong = Coordinates[0];
-	double ActorMaxLong = Coordinates[1];
-	double ActorMinLat = Coordinates[2];
-	double ActorMaxLat = Coordinates[3];
+
+	const double ActorMinLong = Coordinates[0];
+	const double ActorMaxLong = Coordinates[1];
+	const double ActorMinLat = Coordinates[2];
+	const double ActorMaxLat = Coordinates[3];
 	
 	if (ImageSourceKind == ELandscapeImageSourceKind::Napoli)
 	{
@@ -862,7 +854,7 @@ bool UMapDowloader::SetSourceParametersFromActor(bool bDialog)
 
 #if WITH_EDITOR
 
-void UMapDowloader::PostEditChangeProperty(FPropertyChangedEvent& Event)
+void UMapDownloader::PostEditChangeProperty(FPropertyChangedEvent& Event)
 {
 	if (!Event.Property)
 	{
@@ -870,30 +862,28 @@ void UMapDowloader::PostEditChangeProperty(FPropertyChangedEvent& Event)
 		return;
 	}
 
-	FName PropertyName = Event.Property->GetFName();
-
-	if (PropertyName == GET_MEMBER_NAME_CHECKED(UMapDowloader, ImageSourceKind))
+	if (const FName PropertyName = Event.Property->GetFName(); PropertyName == GET_MEMBER_NAME_CHECKED(UMapDownloader, ImageSourceKind))
 	{
 		OnImageSourceChanged(nullptr);
 	}
-	else if (PropertyName == GET_MEMBER_NAME_CHECKED(UMapDowloader, CapabilitiesURL))
+	else if (PropertyName == GET_MEMBER_NAME_CHECKED(UMapDownloader, CapabilitiesURL))
 	{
 		ResetWmsProvider(TArray<FString>(), nullptr, nullptr);
 	}
-	else if (PropertyName == GET_MEMBER_NAME_CHECKED(UMapDowloader, WMS_Title))
+	else if (PropertyName == GET_MEMBER_NAME_CHECKED(UMapDownloader, WMS_Title))
 	{
 		OnLayerChanged();
 	}
-	else if (PropertyName == GET_MEMBER_NAME_CHECKED(UMapDowloader, ParametersSelection))
+	else if (PropertyName == GET_MEMBER_NAME_CHECKED(UMapDownloader, ParametersSelection))
 	{
 		SetSourceParametersBool(false);
 	}
 	else if (
-		PropertyName == GET_MEMBER_NAME_CHECKED(UMapDowloader, ParametersSelection.ParametersBoundingActor) ||
-		PropertyName == GET_MEMBER_NAME_CHECKED(UMapDowloader, ParametersSelection.MinLong) ||
-		PropertyName == GET_MEMBER_NAME_CHECKED(UMapDowloader, ParametersSelection.MaxLong) ||
-		PropertyName == GET_MEMBER_NAME_CHECKED(UMapDowloader, ParametersSelection.MinLat) ||
-		PropertyName == GET_MEMBER_NAME_CHECKED(UMapDowloader, ParametersSelection.MaxLat)
+		PropertyName == GET_MEMBER_NAME_CHECKED(UMapDownloader, ParametersSelection.ParametersBoundingActor) ||
+		PropertyName == GET_MEMBER_NAME_CHECKED(UMapDownloader, ParametersSelection.MinLong) ||
+		PropertyName == GET_MEMBER_NAME_CHECKED(UMapDownloader, ParametersSelection.MaxLong) ||
+		PropertyName == GET_MEMBER_NAME_CHECKED(UMapDownloader, ParametersSelection.MinLat) ||
+		PropertyName == GET_MEMBER_NAME_CHECKED(UMapDownloader, ParametersSelection.MaxLat)
 	)
 	{
 		SetSourceParametersBool(true);
@@ -905,9 +895,9 @@ void UMapDowloader::PostEditChangeProperty(FPropertyChangedEvent& Event)
 #endif
 
 
-void UMapDowloader::OnLayerChanged()
+void UMapDownloader::OnLayerChanged()
 {
-	int LayerIndex = WMS_Provider.Titles.Find(WMS_Title);
+	const int LayerIndex = WMS_Provider.Titles.Find(WMS_Title);
 	if (LayerIndex == INDEX_NONE)
 	{
 		WMS_Help = FString::Format(TEXT("Could not find Layer {0}"), { WMS_Title });
@@ -934,7 +924,7 @@ void UMapDowloader::OnLayerChanged()
 	WMS_Abstract = WMS_Provider.Abstracts[LayerIndex];
 }
 
-void UMapDowloader::OnImageSourceChanged(TFunction<void(bool)> OnComplete)
+void UMapDownloader::OnImageSourceChanged(const TFunction<void(bool)>& OnComplete)
 {
 	if (IsWorldElevation3D())
 	{
@@ -1009,7 +999,7 @@ void UMapDowloader::OnImageSourceChanged(TFunction<void(bool)> OnComplete)
 	}
 }
 
-void UMapDowloader::ResetWmsProvider(TArray<FString> ExcludeCRS, TFunction<bool(FString)> LayerFilter, TFunction<void(bool)> OnComplete)
+void UMapDownloader::ResetWmsProvider(const TArray<FString>& ExcludeCrs, const TFunction<bool(FString)>& LayerFilter, TFunction<void(bool)> OnComplete)
 {
 	if (CapabilitiesURL.IsEmpty())
 	{
@@ -1030,9 +1020,9 @@ void UMapDowloader::ResetWmsProvider(TArray<FString> ExcludeCRS, TFunction<bool(
 	{
 		WMS_Provider.SetFromURL(
 			CapabilitiesURL,
-			ExcludeCRS,
+			ExcludeCrs,
 			LayerFilter,
-			[this, OnComplete](bool bSuccess)
+			[this, OnComplete](const bool bSuccess)
 			{
 				WMS_Abstract = "";
 				WMS_Title = "";
@@ -1067,9 +1057,9 @@ void UMapDowloader::ResetWmsProvider(TArray<FString> ExcludeCRS, TFunction<bool(
 	}
 }
 
-bool UMapDowloader::DownloadImages(bool bIsUserInitiated, bool bEnsureOneBand, TObjectPtr<UGlobalCoordinates> GlobalCoordinates, TArray<FString> &OutDownloadedImages, FString &OutImagesCRS)
+bool UMapDownloader::DownloadImages(const bool bIsUserInitiated, const bool bEnsureOneBand, const TObjectPtr<UGlobalCoordinates> GlobalCoordinates, TArray<FString> &OutDownloadedImages, FString &OutImagesCRS)
 {
-	AActor *Owner = GetOwner();
+	const AActor *Owner = GetOwner();
 	if (!IsValid(Owner))
 	{
 		LCReporter::ShowError(
@@ -1077,8 +1067,8 @@ bool UMapDowloader::DownloadImages(bool bIsUserInitiated, bool bEnsureOneBand, T
 		);
 		return false;
 	}
-	
-	FString Name = Owner->GetWorld()->GetName() + "-" + Owner->GetActorNameOrLabel();
+
+	const FString Name = Owner->GetWorld()->GetName() + "-" + Owner->GetActorNameOrLabel();
 	HMFetcher *Fetcher = CreateFetcher(bIsUserInitiated, Name, bEnsureOneBand, false, false, false, false, nullptr, GlobalCoordinates);
 
 	if (!Fetcher)
@@ -1107,7 +1097,7 @@ bool UMapDowloader::DownloadImages(bool bIsUserInitiated, bool bEnsureOneBand, T
 	}
 }
 
-bool UMapDowloader::ShowMapTilerFreeTierWarning()
+bool UMapDownloader::ShowMapTilerFreeTierWarning()
 {
 	return LCReporter::ShowMessage(
 		LOCTEXT(
@@ -1119,7 +1109,7 @@ bool UMapDowloader::ShowMapTilerFreeTierWarning()
 	);
 }
 
-bool UMapDowloader::ShowMapboxFreeTierWarning()
+bool UMapDownloader::ShowMapboxFreeTierWarning()
 {
 	return LCReporter::ShowMessage(
 		LOCTEXT(

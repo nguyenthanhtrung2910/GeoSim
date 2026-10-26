@@ -23,8 +23,7 @@ bool HMWorldElevation3D::OnFetch(FString, TArray<FString>)
 		LCReporter::ShowError(LOCTEXT("Zoom", "Terrain3D supports zoom levels 0 through 16."));
 		return false;
 	}
-	const int GridSize = 1 << Zoom;
-	if (MinX < 0 || MinY < 0 || MinX > MaxX || MinY > MaxY || MaxX >= GridSize || MaxY >= GridSize)
+	if (const int GridSize = 1 << Zoom; MinX < 0 || MinY < 0 || MinX > MaxX || MinY > MaxY || MaxX >= GridSize || MaxY >= GridSize)
 	{
 		LCReporter::ShowError(LOCTEXT("Bounds", "Invalid ArcGIS tile bounds for the selected XYZ zoom level."));
 		return false;
@@ -73,7 +72,7 @@ bool HMWorldElevation3D::OnFetch(FString, TArray<FString>)
 
 bool HMWorldElevation3D::DecodeTiles(const FString& DownloadFile, int X, int Y, FString& DecodedFile, bool* BShowedDialog)
 {
-	const auto Fail = [&](const FString& Message)
+	const auto fail = [&](const FString& Message)
 	{
 		UE_LOG(LogLandscapeGeneration, Error, TEXT("%s: %s"), *DownloadFile, *Message);
 		if (!bAllowInvalidTiles) LCReporter::ShowOneError(FText::FromString(Message), BShowedDialog);
@@ -82,7 +81,7 @@ bool HMWorldElevation3D::DecodeTiles(const FString& DownloadFile, int X, int Y, 
 	TArray<uint8> Blob;
 	if (!FFileHelper::LoadFileToArray(Blob, *DownloadFile) || Blob.IsEmpty())
 	{
-		return Fail(TEXT("Could not read the LERC tile."));
+		return fail(TEXT("Could not read the LERC tile."));
 	}
 #if PLATFORM_WINDOWS
 	const FString LibraryName = TEXT("Lerc.dll");
@@ -91,7 +90,7 @@ bool HMWorldElevation3D::DecodeTiles(const FString& DownloadFile, int X, int Y, 
 	const FString LibraryName = TEXT("libLerc.so");
 	const FString PlatformName = TEXT("Linux");
 #else
-	return Fail(TEXT("LERC decoding is not supported on this platform."));
+	return fail(TEXT("LERC decoding is not supported on this platform."));
 #endif
 #if PLATFORM_WINDOWS || PLATFORM_LINUX
 	// GDALInterface stages its bundled libraries beside the project binaries.
@@ -105,27 +104,27 @@ bool HMWorldElevation3D::DecodeTiles(const FString& DownloadFile, int X, int Y, 
 			Library = FPlatformProcess::GetDllHandle(*LibraryPath);
 		}
 	}
-	if (!Library) return Fail(TEXT("Could not load the bundled LERC decoder library."));
+	if (!Library) return fail(TEXT("Could not load the bundled LERC decoder library."));
 	ON_SCOPE_EXIT { FPlatformProcess::FreeDllHandle(Library); };
 
 	using FGetBlobInfo = unsigned int (*)(const unsigned char*, unsigned int, unsigned int*, double*, int, int);
 	using FDecode = unsigned int (*)(const unsigned char*, unsigned int, int, unsigned char*, int, int, int, int, unsigned int, void*);
 	const FGetBlobInfo GetBlobInfo = reinterpret_cast<FGetBlobInfo>(FPlatformProcess::GetDllExport(Library, TEXT("lerc_getBlobInfo")));
 	const FDecode Decode = reinterpret_cast<FDecode>(FPlatformProcess::GetDllExport(Library, TEXT("lerc_decode")));
-	if (!GetBlobInfo || !Decode) return Fail(TEXT("The LERC library is missing decoder entry points."));
+	if (!GetBlobInfo || !Decode) return fail(TEXT("The LERC library is missing decoder entry points."));
 
 	unsigned int Info[11] = {};
 	double Ranges[3] = {};
 	if (GetBlobInfo(Blob.GetData(), Blob.Num(), Info, Ranges, 11, 3) != 0)
 	{
-		return Fail(TEXT("Invalid or truncated LERC tile."));
+		return fail(TEXT("Invalid or truncated LERC tile."));
 	}
 	// Terrain3D stores 257 vertex samples over 256 cells, in one Float32 band.
 	if (Info[1] != 6 || Info[2] != 1 || Info[3] != 257 || Info[4] != 257 || Info[5] != 1 || Info[8] > 1 || Info[10] != 0)
 	{
-		return Fail(TEXT("Expected a single-band 257 x 257 Float32 Terrain3D tile."));
+		return fail(TEXT("Expected a single-band 257 x 257 Float32 Terrain3D tile."));
 	}
-	if (Info[6] == 0) return Fail(TEXT("The elevation tile contains only NoData."));
+	if (Info[6] == 0) return fail(TEXT("The elevation tile contains only NoData."));
 	constexpr int Size = 257;
 	TArray<float> Heights;
 	Heights.SetNumUninitialized(Size * Size);
@@ -134,7 +133,7 @@ bool HMWorldElevation3D::DecodeTiles(const FString& DownloadFile, int X, int Y, 
 	if (Decode(Blob.GetData(), Blob.Num(), Info[8], Info[8] ? Valid.GetData() : nullptr,
 		1, Size, Size, 1, 6, Heights.GetData()) != 0)
 	{
-		return Fail(TEXT("LERC elevation decoding failed."));
+		return fail(TEXT("LERC elevation decoding failed."));
 	}
 	constexpr float NoData = -3.402823466e+38F;
 	int ValidCount = 0;
@@ -143,12 +142,12 @@ bool HMWorldElevation3D::DecodeTiles(const FString& DownloadFile, int X, int Y, 
 		if (!Valid[Index] || !FMath::IsFinite(Heights[Index])) Heights[Index] = NoData;
 		else ++ValidCount;
 	}
-	if (ValidCount == 0) return Fail(TEXT("The tile contains no finite valid elevation values."));
+	if (ValidCount == 0) return fail(TEXT("The tile contains no finite valid elevation values."));
 
 	DecodedFile = FPaths::Combine(DownloadDir, FString::Printf(TEXT("ArcGISWorldElevation3D-%d-%d-%d-decoded.tif"), Zoom, X, Y));
 	GDALDriver* Driver = GetGDALDriverManager()->GetDriverByName("GTiff");
 	GDALDataset* Dataset = Driver ? Driver->Create(TCHAR_TO_UTF8(*DecodedFile), Size, Size, 1, GDT_Float32, nullptr) : nullptr;
-	if (!Dataset) return Fail(TEXT("Could not create the decoded Float32 TIFF."));
+	if (!Dataset) return fail(TEXT("Could not create the decoded Float32 TIFF."));
 	ON_SCOPE_EXIT { GDALClose(Dataset); };
 	GDALRasterBand* Band = Dataset->GetRasterBand(1);
 	// A separate NoData value keeps valid sea-level zero samples intact.
@@ -156,7 +155,7 @@ bool HMWorldElevation3D::DecodeTiles(const FString& DownloadFile, int X, int Y, 
 		Band->RasterIO(GF_Write, 0, 0, Size, Size, Heights.GetData(), Size, Size, GDT_Float32, 0, 0) != CE_None ||
 		Dataset->FlushCache() != CE_None)
 	{
-		return Fail(TEXT("Could not write the decoded elevation TIFF."));
+		return fail(TEXT("Could not write the decoded elevation TIFF."));
 	}
 	return true;
 #endif

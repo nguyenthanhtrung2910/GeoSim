@@ -8,6 +8,24 @@
 #include "ImportedRoadData.h"
 #include "OSMRoadImporter.generated.h"
 
+namespace OsmRoadImporterInternal
+{
+	struct FSourceRoadNode
+	{
+		double Longitude = 0;
+		double Latitude = 0;
+	};
+
+	struct FSourceRoadWay
+	{
+		int64 Id = 0;
+		TArray<int64> Nodes;
+		TMap<FString, FString> Tags;
+	};
+
+	bool ParseRoadJson(const FString& Text, TMap<int64, FSourceRoadNode>& Nodes, TArray<FSourceRoadWay>& Ways);
+}
+
 UENUM(BlueprintType)
 enum class EOsmRoadSource : uint8
 {
@@ -113,6 +131,6 @@ private:
     void ClearRoadDataCache();
     FString MakeRoadDataCacheKey();
     bool ImportRoadData(TArray<FImportedRoadWay>& OutWays, bool bIsUserInitiated);
-    bool ImportRoadDataUncached(TArray<FImportedRoadWay>& OutWays, bool bIsUserInitiated);
-    bool LoadSourceText(FString& OutText, bool bIsUserInitiated);
+    bool ImportRoadDataUncached(TArray<FImportedRoadWay>& OutWays, bool bIsUserInitiated) const;
+    bool LoadSourceText(FString& OutText, bool bIsUserInitiated) const;
 };

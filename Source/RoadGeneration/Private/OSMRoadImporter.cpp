@@ -22,30 +22,11 @@
 #include "XmlFile.h"
 #include "XmlNode.h"
 
-#if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
-#include "Engine/Engine.h"
-#include "Misc/AutomationTest.h"
-#include "Misc/Paths.h"
-#endif
-
 DEFINE_LOG_CATEGORY_STATIC(LogOSMRoadImporter, Log, All);
 
-namespace
+namespace OsmRoadImporterInternal
 {
-	struct FSourceRoadNode
-	{
-		double Longitude = 0;
-		double Latitude = 0;
-	};
-
-	struct FSourceRoadWay
-	{
-		int64 Id = 0;
-		TArray<int64> Nodes;
-		TMap<FString, FString> Tags;
-	};
-
-	bool ParseRoadXml(const FString& Text, TMap<int64, FSourceRoadNode>& Nodes, TArray<FSourceRoadWay>& Ways)
+	static bool ParseRoadXml(const FString& Text, TMap<int64, FSourceRoadNode>& Nodes, TArray<FSourceRoadWay>& Ways)
 	{
 		FXmlFile Xml(Text, EConstructMethod::ConstructFromBuffer);
 		const FXmlNode* Root = Xml.GetRootNode();
@@ -92,8 +73,8 @@ namespace
 			if (!Element || !Element->TryGetStringField(TEXT("type"), Type) || !Element->TryGetNumberField(TEXT("id"), Id)) continue;
 			if (Type == TEXT("node"))
 			{
-				FSourceRoadNode Node;
-				if (Element->TryGetNumberField(TEXT("lon"), Node.Longitude) && Element->TryGetNumberField(TEXT("lat"), Node.Latitude))
+				if (FSourceRoadNode Node; Element->TryGetNumberField(TEXT("lon"), Node.Longitude) && Element->
+					TryGetNumberField(TEXT("lat"), Node.Latitude))
 					Nodes.Add(static_cast<int64>(Id), Node);
 				continue;
 			}
@@ -105,8 +86,7 @@ namespace
 			Way.Id = static_cast<int64>(Id);
 			for (const auto& Tag : (*Tags)->Values)
 			{
-				FString TagValue;
-				if (Tag.Value->TryGetString(TagValue)) Way.Tags.Add(FString(*Tag.Key), TagValue);
+				if (FString TagValue; Tag.Value->TryGetString(TagValue)) Way.Tags.Add(FString(*Tag.Key), TagValue);
 			}
 			if (!Way.Tags.Contains(TEXT("highway"))) continue;
 			const TArray<TSharedPtr<FJsonValue>>* Geometry = nullptr;
@@ -120,8 +100,8 @@ namespace
 				if (Geometry && Geometry->IsValidIndex(i))
 				{
 					const TSharedPtr<FJsonObject> Point = (*Geometry)[i]->AsObject();
-					FSourceRoadNode Node;
-					if (Point && Point->TryGetNumberField(TEXT("lon"), Node.Longitude) && Point->TryGetNumberField(TEXT("lat"), Node.Latitude))
+					if (FSourceRoadNode Node; Point && Point->TryGetNumberField(TEXT("lon"), Node.Longitude) && Point->
+						TryGetNumberField(TEXT("lat"), Node.Latitude))
 						Nodes.Add(NodeId, Node);
 				}
 			}
@@ -130,6 +110,8 @@ namespace
 		return true;
 	}
 }
+
+using namespace OsmRoadImporterInternal;
 
 void AOsmRoadImporter::ClearRoadDataCache()
 {
@@ -143,14 +125,15 @@ void AOsmRoadImporter::ClearRoadDataCache()
 		CachedRoadWays.Reset();
 		RoadDataCacheMutex.Unlock();
 	}
-	UE_LOG(LogOSMRoadImporter, Log, TEXT("Shared road data cleared. Click Generate on OSMRoadImporter before generating roads."));
+	UE_LOG(LogOSMRoadImporter, Log,
+	       TEXT("Shared road data cleared. Click Generate on OSMRoadImporter before generating roads."));
 }
 
 FString AOsmRoadImporter::MakeRoadDataCacheKey()
 {
 	check(IsInGameThread());
 	FString Key;
-	auto AppendProperty = [&Key](UObject* Object, FName PropertyName)
+	auto append_property = [&Key](UObject* Object, const FName PropertyName)
 	{
 		if (!Object) return;
 		const FProperty* Property = FindFProperty<FProperty>(Object->GetClass(), PropertyName);
@@ -163,16 +146,17 @@ FString AOsmRoadImporter::MakeRoadDataCacheKey()
 		TEXT("BoundingMethod"), TEXT("BoundingZoneZoom"), TEXT("BoundingZoneMinX"), TEXT("BoundingZoneMaxX"),
 		TEXT("BoundingZoneMinY"), TEXT("BoundingZoneMaxY"), TEXT("BoundingActorSelection"),
 		TEXT("TerrainSelection"), TEXT("PointsOffset") })
-		AppendProperty(this, FName(Name));
+		append_property(this, FName(Name));
 
 	if (Source == EOsmRoadSource::LocalFile)
 	{
 		Key += FString::Printf(TEXT("LocalFileStat=%lld/%lld\n"), IFileManager::Get().FileSize(*LocalFile),
 			IFileManager::Get().GetTimeStamp(*LocalFile).GetTicks());
 	}
-	if (BoundingMethod == EOsmRoadBounds::BoundingActor && Source != EOsmRoadSource::LocalFile && Source != EOsmRoadSource::OverpassQuery)
+	if (BoundingMethod == EOsmRoadBounds::BoundingActor && Source != EOsmRoadSource::LocalFile && Source !=
+		EOsmRoadSource::OverpassQuery)
 	{
-		if (AActor* BoundingActor = BoundingActorSelection.GetActor(GetWorld()))
+		if (const AActor* BoundingActor = BoundingActorSelection.GetActor(GetWorld()))
 		{
 			FVector Origin, Extent;
 			BoundingActor->GetActorBounds(true, Origin, Extent);
@@ -182,24 +166,27 @@ FString AOsmRoadImporter::MakeRoadDataCacheKey()
 		}
 	}
 	TArray<FString> TargetKeys;
-	for (AActor* Target : TerrainSelection.GetAllActors(GetWorld()))
+	for (const AActor* Target : TerrainSelection.GetAllActors(GetWorld()))
 	{
 		if (!IsValid(Target)) continue;
 		TargetKeys.Add(Target->GetPathName() + Target->GetActorTransform().ToString());
 	}
 	TargetKeys.Sort();
 	for (const FString& TargetKey : TargetKeys) Key += TEXT("Terrain=") + TargetKey + TEXT("\n");
-	if (UWorld* World = GetWorld()) Key += TEXT("Origin=") + World->OriginLocation.ToString() + TEXT("\n");
+	if (const UWorld* World = GetWorld()) Key += TEXT("Origin=") + World->OriginLocation.ToString() + TEXT("\n");
 	if (UGlobalCoordinates* Coordinates = ALevelCoordinates::GetGlobalCoordinates(GetWorld(), false))
 	{
 		Key += TEXT("Coordinates=") + Coordinates->GetPathName() + TEXT("\n");
-		for (const TCHAR* Name : { TEXT("CRS"), TEXT("CmPerLongUnit"), TEXT("CmPerLatUnit"), TEXT("WorldOriginLong"), TEXT("WorldOriginLat") })
-			AppendProperty(Coordinates, FName(Name));
+		for (const TCHAR* Name : {
+			     TEXT("CRS"), TEXT("CmPerLongUnit"), TEXT("CmPerLatUnit"), TEXT("WorldOriginLong"),
+			     TEXT("WorldOriginLat")
+		     })
+			append_property(Coordinates, FName(Name));
 	}
 	return Key;
 }
 
-bool AOsmRoadImporter::ImportRoadData(TArray<FImportedRoadWay>& OutWays, bool bIsUserInitiated)
+bool AOsmRoadImporter::ImportRoadData(TArray<FImportedRoadWay>& OutWays, const bool bIsUserInitiated)
 {
 	OutWays.Reset();
 	if (IsInGameThread())
@@ -226,7 +213,10 @@ bool AOsmRoadImporter::ImportRoadData(TArray<FImportedRoadWay>& OutWays, bool bI
 	if (RoadDataCacheRevision.GetValue() != Revision || CompletedKey != Key)
 	{
 		OutWays.Reset();
-		UE_LOG(LogOSMRoadImporter, Warning, TEXT("Road import settings or cache revision changed during import. Generate again to use the updated source."));
+		UE_LOG(LogOSMRoadImporter, Warning,
+		       TEXT(
+			       "Road import settings or cache revision changed during import. Generate again to use the updated source."
+		       ));
 		return false;
 	}
 	CachedRoadWays = OutWays;
@@ -247,7 +237,8 @@ bool AOsmRoadImporter::GetCachedRoadData(TArray<FImportedRoadWay>& OutWays)
 	const int32 Revision = RoadDataCacheRevision.GetValue();
 	if (CachedRoadDataRevision != Revision || CachedRoadWays.IsEmpty())
 	{
-		UE_LOG(LogOSMRoadImporter, Error, TEXT("No cached road data. Click Generate on the referenced OSMRoadImporter first."));
+		UE_LOG(LogOSMRoadImporter, Error,
+		       TEXT("No cached road data. Click Generate on the referenced OSMRoadImporter first."));
 		return false;
 	}
 	FString Key;
@@ -264,7 +255,7 @@ bool AOsmRoadImporter::GetCachedRoadData(TArray<FImportedRoadWay>& OutWays)
 	return true;
 }
 
-bool AOsmRoadImporter::ImportRoadDataUncached(TArray<FImportedRoadWay>& OutWays, bool bIsUserInitiated)
+bool AOsmRoadImporter::ImportRoadDataUncached(TArray<FImportedRoadWay>& OutWays, bool bIsUserInitiated) const
 {
 	OutWays.Reset();
 	if (IsInGameThread())
@@ -278,8 +269,9 @@ bool AOsmRoadImporter::ImportRoadDataUncached(TArray<FImportedRoadWay>& OutWays,
 	Text.TrimStartInline();
 	TMap<int64, FSourceRoadNode> SourceNodes;
 	TArray<FSourceRoadWay> SourceWays;
-	const bool bParsed = Text.StartsWith(TEXT("<")) ? ParseRoadXml(Text, SourceNodes, SourceWays) : ParseRoadJson(Text, SourceNodes, SourceWays);
-	if (!bParsed || SourceWays.IsEmpty())
+	if (const bool bParsed = Text.StartsWith(TEXT("<"))
+		                         ? ParseRoadXml(Text, SourceNodes, SourceWays)
+		                         : ParseRoadJson(Text, SourceNodes, SourceWays); !bParsed || SourceWays.IsEmpty())
 	{
 		UE_LOG(LogOSMRoadImporter, Error, TEXT("Road data requires OSM XML or Overpass JSON with highway ways and node IDs."));
 		return false;
@@ -301,14 +293,14 @@ bool AOsmRoadImporter::ImportRoadDataUncached(TArray<FImportedRoadWay>& OutWays,
 		TMap<int64, FImportedRoadPoint> Projected;
 		TSet<int64> ImportedWayIds;
 		int32 MissingTerrain = 0;
-		for (const FSourceRoadWay& SourceWay : SourceWays)
+		for (const auto& [Id, Nodes, Tags] : SourceWays)
 		{
-			if (ImportedWayIds.Contains(SourceWay.Id)) continue;
-			ImportedWayIds.Add(SourceWay.Id);
+			if (ImportedWayIds.Contains(Id)) continue;
+			ImportedWayIds.Add(Id);
 			FImportedRoadWay Way;
-			Way.WayId = SourceWay.Id;
-			Way.Tags = SourceWay.Tags;
-			for (int64 NodeId : SourceWay.Nodes)
+			Way.WayId = Id;
+			Way.Tags = Tags;
+			for (int64 NodeId : Nodes)
 			{
 				if (!Projected.Contains(NodeId))
 				{
@@ -343,11 +335,12 @@ bool AOsmRoadImporter::ImportRoadDataUncached(TArray<FImportedRoadWay>& OutWays,
 			OutWays.Add(MoveTemp(Way));
 		}
 		OGRCoordinateTransformation::DestroyCT(Transform);
-		UE_LOG(LogOSMRoadImporter, Log, TEXT("Imported %d road ways, %d nodes; %d nodes lack source geometry or terrain collision."), OutWays.Num(), Projected.Num(), MissingTerrain);
+		UE_LOG(LogOSMRoadImporter, Log,
+		       TEXT("Imported %d road ways, %d nodes; %d nodes lack source geometry or terrain collision."),
+		       OutWays.Num(), Projected.Num(), MissingTerrain);
 		return true;
 	});
 }
-
 
 AOsmRoadImporter::AOsmRoadImporter()
 {
@@ -376,7 +369,7 @@ void AOsmRoadImporter::ClearData()
     ClearRoadDataCache();
 }
 
-bool AOsmRoadImporter::ConfigureForTiles(int Zoom, int MinX, int MaxX, int MinY, int MaxY)
+bool AOsmRoadImporter::ConfigureForTiles(const int Zoom, const int MinX, const int MaxX, const int MinY, const int MaxY)
 {
     BoundingMethod = EOsmRoadBounds::TileNumbers;
     BoundingZoneZoom = Zoom;
@@ -388,7 +381,7 @@ bool AOsmRoadImporter::ConfigureForTiles(int Zoom, int MinX, int MaxX, int MinY,
     return true;
 }
 
-bool AOsmRoadImporter::LoadSourceText(FString& OutText, bool bIsUserInitiated)
+bool AOsmRoadImporter::LoadSourceText(FString& OutText, const bool bIsUserInitiated) const
 {
     if (Source == EOsmRoadSource::LocalFile)
         return FFileHelper::LoadFileToString(OutText, *LocalFile);
@@ -411,7 +404,8 @@ bool AOsmRoadImporter::LoadSourceText(FString& OutText, bool bIsUserInitiated)
                     return LandscapeUtils::GetLandscapeCRSBounds(Landscape, TEXT("EPSG:4326"), Bounds);
                 FVector Origin, Extent;
                 BoundsActor->GetActorBounds(true, Origin, Extent);
-                return ALevelCoordinates::GetCRSCoordinatesFromOriginExtent(GetWorld(), Origin, Extent, TEXT("EPSG:4326"), Bounds);
+                return ALevelCoordinates::GetCRSCoordinatesFromOriginExtent(
+	                GetWorld(), Origin, Extent, TEXT("EPSG:4326"), Bounds);
             }
             if (BoundingZoneZoom < 0 || BoundingZoneZoom > 22) return false;
             const double TileCount = static_cast<double>(1 << BoundingZoneZoom);
@@ -420,8 +414,10 @@ bool AOsmRoadImporter::LoadSourceText(FString& OutText, bool bIsUserInitiated)
                 BoundingZoneMaxX >= TileCount || BoundingZoneMaxY >= TileCount) return false;
             const double West = BoundingZoneMinX / TileCount * 360.0 - 180.0;
             const double East = (BoundingZoneMaxX + 1) / TileCount * 360.0 - 180.0;
-            const double North = FMath::RadiansToDegrees(FMath::Atan(FMath::Sinh(UE_PI * (1.0 - 2.0 * BoundingZoneMinY / TileCount))));
-            const double South = FMath::RadiansToDegrees(FMath::Atan(FMath::Sinh(UE_PI * (1.0 - 2.0 * (BoundingZoneMaxY + 1) / TileCount))));
+            const double North = FMath::RadiansToDegrees(
+	            FMath::Atan(FMath::Sinh(UE_PI * (1.0 - 2.0 * BoundingZoneMinY / TileCount))));
+            const double South = FMath::RadiansToDegrees(
+	            FMath::Atan(FMath::Sinh(UE_PI * (1.0 - 2.0 * (BoundingZoneMaxY + 1) / TileCount))));
             Bounds = FVector4d(West, East, South, North);
             return true;
         });
@@ -439,134 +435,3 @@ bool AOsmRoadImporter::LoadSourceText(FString& OutText, bool bIsUserInitiated)
     GDALClose(Dataset);
     return FFileHelper::LoadFileToString(OutText, *File);
 }
-
-#if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FOsmRoadImporterCacheTest, "Landscapes.OSMRoadImporter.LocalFileCache",
-    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FOsmRoadImporterCacheTest::RunTest(const FString& Parameters)
-{
-    const UWorld::InitializationValues Init = UWorld::InitializationValues()
-        .AllowAudioPlayback(false).CreateNavigation(false).CreateAISystem(false);
-    UWorld* World = UWorld::CreateWorld(EWorldType::Editor, false, NAME_None, nullptr, true, ERHIFeatureLevel::Num, &Init);
-    if (!TestNotNull(TEXT("Isolated data import world"), World)) return false;
-    GEngine->CreateNewWorldContext(EWorldType::Editor).SetCurrentWorld(World);
-    AOsmRoadImporter* Importer = World->SpawnActor<AOsmRoadImporter>();
-    ALevelCoordinates* Coordinates = World->SpawnActor<ALevelCoordinates>();
-    if (!Importer || !Coordinates)
-    {
-        AddError(TEXT("Could not create data importer and coordinates"));
-        World->DestroyWorld(false);
-        GEngine->DestroyWorldContext(World);
-        return false;
-    }
-    TestTrue(TEXT("Data importer does not inherit output-folder settings"),
-        FindFProperty<FProperty>(Importer->GetClass(), TEXT("SpawnedActorsPath")) == nullptr);
-    TestTrue(TEXT("Data importer does not inherit spline-generation settings"),
-        FindFProperty<FProperty>(Importer->GetClass(), TEXT("bUseLandscapeSplines")) == nullptr);
-
-    const FString File = FPaths::CreateTempFilename(*FPaths::ProjectSavedDir(), TEXT("OSMRoadImporter"), TEXT(".osm"));
-    const FString Xml = TEXT(
-        "<osm version=\"0.6\">"
-        "<node id=\"1\" lon=\"0\" lat=\"0\"/><node id=\"2\" lon=\"0.00001\" lat=\"0\"/>"
-        "<node id=\"3\" lon=\"0.00002\" lat=\"0.00001\"/>"
-        "<way id=\"10\"><nd ref=\"1\"/><nd ref=\"2\"/><tag k=\"highway\" v=\"residential\"/></way>"
-        "<way id=\"20\"><nd ref=\"2\"/><nd ref=\"3\"/><tag k=\"highway\" v=\"primary\"/>"
-        "<tag k=\"bridge\" v=\"yes\"/><tag k=\"layer\" v=\"1\"/></way>"
-        "<way id=\"30\"><nd ref=\"3\"/><nd ref=\"1\"/><tag k=\"highway\" v=\"footway\"/></way>"
-        "<way id=\"40\"><nd ref=\"1\"/><nd ref=\"2\"/><tag k=\"building\" v=\"yes\"/></way>"
-        "</osm>");
-    if (!FFileHelper::SaveStringToFile(Xml, *File))
-    {
-        AddError(TEXT("Could not write temporary OSM source"));
-        World->DestroyWorld(false);
-        GEngine->DestroyWorldContext(World);
-        return false;
-    }
-    Importer->Source = EOsmRoadSource::LocalFile;
-    Importer->LocalFile = File;
-    Importer->PointsOffset = FVector(0, 0, 5);
-    Importer->TerrainSelection.ActorSelectionMode = EActorSelectionMode::Actor;
-    Importer->TerrainSelection.Actor = Importer; // No collision: missing samples must remain in the cache.
-
-    struct FResult
-    {
-        bool bImported = false;
-        bool bCopied = false;
-        bool bCopyIndependent = false;
-        bool bStaleRejected = false;
-        bool bRefreshed = false;
-        bool bClearRejected = false;
-        TArray<FImportedRoadWay> Ways;
-    };
-    AddExpectedError(TEXT("Cached road data is stale."), EAutomationExpectedErrorFlags::Contains, 1);
-    AddExpectedError(TEXT("No cached road data."), EAutomationExpectedErrorFlags::Contains, 1);
-    TSharedRef<TFuture<FResult>> Future = MakeShared<TFuture<FResult>>(Async(EAsyncExecution::Thread, [Importer]()
-    {
-        FResult Result;
-        Result.bImported = Importer->ImportRoadData(Result.Ways, false);
-        TArray<FImportedRoadWay> Copy;
-        Result.bCopied = Importer->GetCachedRoadData(Copy);
-        if (!Copy.IsEmpty()) Copy[0].Tags.Add(TEXT("test-copy-only"), TEXT("yes"));
-        Result.bCopyIndependent = Importer->GetCachedRoadData(Copy) && !Copy.IsEmpty() && !Copy[0].Tags.Contains(TEXT("test-copy-only"));
-        Concurrency::RunOnGameThreadAndWait([Importer]() { Importer->PointsOffset.Z += 10; return true; });
-        Result.bStaleRejected = !Importer->GetCachedRoadData(Copy);
-        TArray<FImportedRoadWay> Refreshed;
-        Result.bRefreshed = Importer->ImportRoadData(Refreshed, false);
-        Concurrency::RunOnGameThreadAndWait([Importer]() { Importer->ClearData(); return true; });
-        Result.bClearRejected = !Importer->GetCachedRoadData(Copy);
-        return Result;
-    }));
-
-    ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([this, Future, World, File]()
-    {
-        if (!Future->IsReady()) return false;
-        const FResult Result = Future->Get();
-        TestTrue(TEXT("Local OSM file imports"), Result.bImported);
-        TestTrue(TEXT("Road data can be copied without reimport"), Result.bCopied);
-        TestTrue(TEXT("Generator changes cannot mutate the shared cache"), Result.bCopyIndependent);
-        TestTrue(TEXT("Changed import settings invalidate cached data"), Result.bStaleRejected);
-        TestTrue(TEXT("Explicit generation refreshes invalidated data"), Result.bRefreshed);
-        TestTrue(TEXT("Clear removes cached data"), Result.bClearRejected);
-        TestEqual(TEXT("All highway classes remain; building ways are excluded"), Result.Ways.Num(), 3);
-        if (Result.Ways.Num() == 3)
-        {
-            TestEqual(TEXT("Source way identity is retained"), Result.Ways[0].WayId, int64(10));
-            TestEqual(TEXT("Shared node IDs are retained"), Result.Ways[0].Points[1].NodeId, Result.Ways[1].Points[0].NodeId);
-            TestEqual(TEXT("Bridge tags are retained for generator filtering"), Result.Ways[1].Tags.FindRef(TEXT("bridge")), FString(TEXT("yes")));
-            TestEqual(TEXT("Footways are cached for other generators"), Result.Ways[2].Tags.FindRef(TEXT("highway")), FString(TEXT("footway")));
-            TestEqual(TEXT("Placement offset is applied"), Result.Ways[0].Points[0].WorldLocation.Z, 5.0);
-            TestFalse(TEXT("Missing terrain is marked without filtering the point"), Result.Ways[0].Points[0].bHasTerrain);
-        }
-        IFileManager::Get().Delete(*File);
-        World->DestroyWorld(false);
-        GEngine->DestroyWorldContext(World);
-        return true;
-    }));
-    return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FOSMRoadImporterJsonTest, "Landscapes.OSMRoadImporter.JsonTopology",
-    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FOSMRoadImporterJsonTest::RunTest(const FString& Parameters)
-{
-    const FString Json = TEXT(R"({"elements":[
-        {"type":"way","id":77,"nodes":[11,12],"geometry":[{"lon":1,"lat":2},{"lon":3,"lat":4}],
-         "tags":{"highway":"primary","bridge":"yes","layer":"1","lanes":"2"}},
-        {"type":"way","id":78,"nodes":[11,12],"tags":{"building":"yes"}}
-    ]})");
-    TMap<int64, FSourceRoadNode> Nodes;
-    TArray<FSourceRoadWay> Ways;
-    TestTrue(TEXT("Overpass JSON with inline geometry parses"), ParseRoadJson(Json, Nodes, Ways));
-    TestEqual(TEXT("Only highway ways are cached"), Ways.Num(), 1);
-    TestEqual(TEXT("Inline geometry supplies referenced nodes"), Nodes.Num(), 2);
-    if (Ways.Num() == 1)
-    {
-        TestEqual(TEXT("Node order is retained"), Ways[0].Nodes[1], int64(12));
-        TestEqual(TEXT("Non-ground highway attributes are retained"), Ways[0].Tags.FindRef(TEXT("bridge")), FString(TEXT("yes")));
-        TestEqual(TEXT("Other way attributes are retained"), Ways[0].Tags.FindRef(TEXT("lanes")), FString(TEXT("2")));
-    }
-    return true;
-}
-#endif

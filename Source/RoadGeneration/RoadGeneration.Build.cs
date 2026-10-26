@@ -2,7 +2,7 @@ using UnrealBuildTool;
 
 public class RoadGeneration : ModuleRules
 {
-    public RoadGeneration(ReadOnlyTargetRules Target) : base(Target)
+    public RoadGeneration(ReadOnlyTargetRules target) : base(target)
     {
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
@@ -15,7 +15,7 @@ public class RoadGeneration : ModuleRules
             "LandscapeUtils", "ConcurrencyHelpers", "Json", "XmlParser"
         ]);
 
-        if (Target.bBuildEditor)
+        if (target.bBuildEditor)
         {
             PrivateDependencyModuleNames.Add("UnrealEd");
         }

@@ -10,6 +10,6 @@ public class GeoSimTarget : TargetRules
 		Type = TargetType.Game;
 		DefaultBuildSettings = BuildSettingsVersion.V7;
 		IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_8;
-		ExtraModuleNames.AddRange(["GeoSim", "RoadGeneration", "LandscapeGeneration"]);
+		ExtraModuleNames.AddRange(["GeoSim", "RoadGeneration", "LandscapeGeneration", "BuildingGeneration"]);
 	}
 }

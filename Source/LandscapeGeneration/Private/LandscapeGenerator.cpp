@@ -11,8 +11,6 @@
 #include "LandscapeUtils/LandscapeUtils.h"
 #include "Coordinates/LevelCoordinates.h"
 #include "ImageDownloader/HMDebugFetcher.h"
-#include "ImageDownloader/Transformers/HMMerge.h"
-#include "LCCommon/LCSettings.h"
 #include "LCCommon/LCBlueprintLibrary.h"
 #include "ConcurrencyHelpers/Concurrency.h"
 #include "ConcurrencyHelpers/LCReporter.h"
@@ -20,19 +18,13 @@
 #include "Async/Async.h"
 #include "Components/DecalComponent.h"
 #include "Internationalization/Regex.h"
-#include "Kismet/GameplayStatics.h"
 #include "LandscapeSubsystem.h"
 #include "Misc/MessageDialog.h"
 #include "Misc/EngineVersionComparison.h"
-#include "HAL/ThreadManager.h"
 
 #if WITH_EDITOR
 
 #include "Editor.h"
-#include "EditorModes.h"
-#include "EditorModeManager.h"
-#include "LandscapeEditorObject.h"
-#include "LandscapeImportHelper.h"
 #include "Subsystems/EditorActorSubsystem.h"
 #include "Styling/AppStyle.h"
 
@@ -44,8 +36,8 @@ ALandscapeGenerator::ALandscapeGenerator() : AActor()
 {
 	PrimaryActorTick.bCanEverTick = false;
 
-	HeightmapDownloader = CreateDefaultSubobject<UMapDowloader>(TEXT("HeightmapDownloader"));
-	DecalDownloader = CreateDefaultSubobject<UMapDowloader>(TEXT("DecalDownloader"));
+	HeightmapDownloader = CreateDefaultSubobject<UMapDownloader>(TEXT("HeightmapDownloader"));
+	DecalDownloader = CreateDefaultSubobject<UMapDownloader>(TEXT("DecalDownloader"));
 	DecalDownloader->bCropCoordinates = true;
 	DecalDownloader->bCropFollowingParametersSelection = true;
 	PositionBasedGeneration = CreateDefaultSubobject<ULCPositionBasedGeneration >(TEXT("PositionBasedGeneration"));
@@ -58,8 +50,7 @@ TArray<UObject*> ALandscapeGenerator::GetGeneratedObjects() const
 
 	for (auto &DecalActor : DecalActors)
 	{
-		ADecalActor *LoadedDecalActor = DecalActor.LoadSynchronous();
-		if (LoadedDecalActor)
+		if (DecalActor.LoadSynchronous())
 		{
 			Result.Add(DecalActor.LoadSynchronous());
 		}
@@ -71,8 +62,7 @@ TArray<UObject*> ALandscapeGenerator::GetGeneratedObjects() const
 
 	for (auto &LandscapeStreamingProxy: SpawnedLandscapeStreamingProxies)
 	{
-		ALandscapeStreamingProxy *LoadedProxy = LandscapeStreamingProxy.LoadSynchronous();
-		if (IsValid(LoadedProxy))
+		if (ALandscapeStreamingProxy *LoadedProxy = LandscapeStreamingProxy.LoadSynchronous(); IsValid(LoadedProxy))
 		{
 			Result.Add(LoadedProxy);
 		}
@@ -84,8 +74,7 @@ TArray<UObject*> ALandscapeGenerator::GetGeneratedObjects() const
 			);
 		}
 	}
-	ALandscape *LoadedLandscape = SpawnedLandscape.LoadSynchronous();
-	if (LoadedLandscape)
+	if (ALandscape *LoadedLandscape = SpawnedLandscape.LoadSynchronous())
 		Result.Add(LoadedLandscape);
 	else
 		UE_LOG(LogLandscapeGeneration, Warning, TEXT("GetGeneratedObjects: SpawnedLandscape soft pointer is stale in spawner %s"), *GetActorNameOrLabel());
@@ -639,10 +628,7 @@ bool ALandscapeGenerator::SpawnLandscape(FName SpawnedActorsPathOverride, bool b
 			check(false)
 			return false;
 		}
-
 	}
-
-	return true;
 }
 
 #endif
@@ -753,12 +739,12 @@ void ALandscapeGenerator::PostEditChangeProperty(FPropertyChangedEvent& Event)
 
 bool ALandscapeGenerator::HasMapboxToken()
 {
-	return UMapDowloader::HasMapboxToken();
+	return UMapDownloader::HasMapboxToken();
 }
 
 bool ALandscapeGenerator::HasMapTilerToken()
 {
-	return UMapDowloader::HasMapTilerToken();
+	return UMapDownloader::HasMapTilerToken();
 }
 
 
