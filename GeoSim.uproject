@@ -30,6 +30,10 @@
 	],
 	"Plugins": [
 		{
+			"Name": "GameFeatures",
+			"Enabled": true
+		},
+		{
 			"Name": "RoadConstructor",
 			"Enabled": true
 		},

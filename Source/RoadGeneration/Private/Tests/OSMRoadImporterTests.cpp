@@ -9,6 +9,8 @@
 #include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 #include "HAL/FileManager.h"
 #include "UObject/UnrealType.h"
 
@@ -141,6 +143,52 @@ bool FOSMRoadImporterJsonTest::RunTest(const FString& Parameters)
         TestEqual(TEXT("Node order is retained"), Ways[0].Nodes[1], static_cast<int64>(12));
         TestEqual(TEXT("Non-ground highway attributes are retained"), Ways[0].Tags.FindRef(TEXT("bridge")), FString(TEXT("yes")));
         TestEqual(TEXT("Other way attributes are retained"), Ways[0].Tags.FindRef(TEXT("lanes")), FString(TEXT("2")));
+    }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FOSMRoadImporterXmlTest, "Landscapes.OSMRoadImporter.XmlTopology",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FOSMRoadImporterXmlTest::RunTest(const FString& Parameters)
+{
+    const FString Body = TEXT(
+        "<osm version=\"0.6\" generator=\"Overpass API\">\n"
+        "<note>OpenStreetMap data</note>\n<meta osm_base=\"2026-10-27T22:20:17Z\"/>\n"
+        "<node id=\"265665810\" lat=\"44.6033254\" lon=\"33.5209404\"/>\n"
+        "<node id=\"268807404\" lat=\"44.6088627\" lon=\"33.5179027\"/>\n"
+        "<way id=\"12345678901\"><nd ref=\"265665810\"/><nd ref=\"268807404\"/>"
+        "<tag k=\"highway\" v=\"footway\"/><tag k=\"lanes\" v=\"3\"/></way>\n</osm>");
+    for (const FString Prefix : { FString(), FString(TEXT("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")),
+        FString(TEXT("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")) })
+    {
+        TMap<int64, FSourceRoadNode> Nodes;
+        TArray<FSourceRoadWay> Ways;
+        TestTrue(TEXT("OSM XML parses with no declaration, a separate declaration, or an inline declaration"),
+            ParseRoadXml(Prefix + Body, Nodes, Ways));
+        TestEqual(TEXT("OSM XML node count"), Nodes.Num(), 2);
+        TestEqual(TEXT("OSM XML highway count"), Ways.Num(), 1);
+        if (Ways.Num() == 1)
+        {
+            TestEqual(TEXT("64-bit way identity is retained"), Ways[0].Id, int64(12345678901));
+            TestEqual(TEXT("Node references are retained"), Ways[0].Nodes[1], int64(268807404));
+            TestEqual(TEXT("Highway tags are retained"), Ways[0].Tags.FindRef(TEXT("highway")), FString(TEXT("footway")));
+        }
+    }
+    // Optional local reproduction without making downloaded data a test dependency.
+    FString SourceFile;
+    if (FParse::Value(FCommandLine::Get(), TEXT("OSMRoadXmlFile="), SourceFile))
+    {
+        FString Xml;
+        if (!TestTrue(TEXT("Read supplied OSM XML file"), FFileHelper::LoadFileToString(Xml, *SourceFile))) return false;
+        TMap<int64, FSourceRoadNode> Nodes;
+        TArray<FSourceRoadWay> Ways;
+        TestTrue(TEXT("Downloaded OSM XML parses"), ParseRoadXml(Xml, Nodes, Ways));
+        TestTrue(TEXT("Downloaded XML contains nodes and highway ways"), !Nodes.IsEmpty() && !Ways.IsEmpty());
+        for (const FSourceRoadWay& Way : Ways)
+            for (int64 NodeId : Way.Nodes)
+                TestTrue(TEXT("Downloaded highway references have node coordinates"), Nodes.Contains(NodeId));
+        AddInfo(FString::Printf(TEXT("Downloaded OSM: %d nodes, %d highway ways."), Nodes.Num(), Ways.Num()));
     }
     return true;
 }

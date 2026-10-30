@@ -10,7 +10,8 @@ struct FImportedRoadWay;
 namespace RoadGenerationSignatures
 {
 	FString RoadInputs(const ARoadGenerator& Generator, const TArray<FImportedRoadWay>& Ways, FName OutputFolder);
-	FString RoadOutput(const AOsmRoadScene* Scene);
+	FString RoadGeometryInputs(const ARoadGenerator& Generator, const TArray<FImportedRoadWay>& Ways, FName OutputFolder);
+	FString JunctionInputs(const ARoadGenerator& Generator, const FString& CurveInputs);
 	FString LandscapeInputs(const ARoadGenerator& Generator, const AOsmRoadScene& Scene);
 	FString LandscapeOutput(const ALandscape* Landscape, const TSet<FString>& Prefixes);
 }

@@ -4,14 +4,14 @@
 
 #include "ImageDownloader/WMSProvider.h"
 #include "ImageDownloader/HMFetcher.h"
+#include "HMRescaleMap.h"
 #include "ImageDownloader/ParametersSelection.h"
 #include "ConsoleHelpers/ExternalTool.h"
 #include "Coordinates/LevelCoordinates.h"
 
 #include "CoreMinimal.h"
 #include "Templates/Function.h"
-#include "GenericPlatform/GenericPlatformMisc.h" 
-#include "Delegates/Delegate.h"
+#include "GenericPlatform/GenericPlatformMisc.h"
 #include "Landscape.h"
 
 #include "MapDownloader.generated.h"
@@ -755,10 +755,17 @@ public:
 
 	UPROPERTY(
 		EditAnywhere, BlueprintReadWrite, Category = "Resolution",
-		meta = (EditCondition = "bScaleResolution", EditConditionHides, DisplayPriority = "21")
+		meta = (EditCondition = "bScaleResolution", EditConditionHides, DisplayPriority = "21", ClampMin = "1", UIMin = "1")
 	)
 	/* When different from 100%, your heightmap resolution will be scaled up or down using GDAL. */
 	int PrecisionPercent = 100;
+
+	/** GDAL resampling algorithm used when scaling the heightmap resolution. */
+	UPROPERTY(
+		EditAnywhere, BlueprintReadWrite, Category = "Resolution",
+		meta = (EditCondition = "bScaleResolution", EditConditionHides, DisplayPriority = "22")
+	)
+	EMapResamplingMethod ResamplingMethod = EMapResamplingMethod::Nearest;
 
 
 	/**********************

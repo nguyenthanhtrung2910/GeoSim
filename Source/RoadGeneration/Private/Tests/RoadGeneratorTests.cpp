@@ -7,11 +7,15 @@
 #include "Algo/Reverse.h"
 #include "Misc/AutomationTest.h"
 #if WITH_EDITOR
+#include "UObject/UnrealType.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "Engine/StaticMeshActor.h"
+#include "EngineUtils.h"
 #include "Containers/Ticker.h"
 #include "TimerManager.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
 #include "LandscapeEdit.h"
 #include "LandscapeEditLayer.h"
 #include "Landscape.h"
@@ -105,16 +109,24 @@ bool FRoadGeneratorLaneCountTest::RunTest(const FString& Parameters)
 	TArray<FImportSpan> Spans = PrepareSpans({ Way, Branch }, {}, true, 0, 0);
 	TestEqual(TEXT("Lane tag reaches the generator"), Spans[0].LaneCount, 3);
 	TestEqual(TEXT("Missing lane tag retains the highway default"), Spans[1].LaneCount, 0);
+	Source->LeftLanes = Source->RightLanes = { Driving, Sidewalk };
 	auto SameStyle = [Source](const FImportSpan&) { return Source; };
-	TestEqual(TEXT("Lane-count changes cannot be lost through merging"), MergeStraightSpans(Spans, 10, SameStyle), 0);
+	TestEqual(TEXT("Lane-count changes cannot be lost through merging"), MergeSharedNodeSpans(Spans, SameStyle), 0);
 	Branch.Tags.Add(TEXT("lanes"), TEXT("3"));
 	Spans = PrepareSpans({ Way, Branch }, {}, true, 0, 0);
-	TestEqual(TEXT("Equal lane counts can merge without reversal"), MergeStraightSpans(Spans, 10, SameStyle), 1);
+	TestEqual(TEXT("Equal lane counts can merge without reversal"), MergeSharedNodeSpans(Spans, SameStyle), 1);
+	Source->LeftLanes = Source->RightLanes = { Driving, Sidewalk };
+	Way.Tags.Remove(TEXT("lanes"));
+	Branch.Tags.Add(TEXT("lanes"), TEXT("2"));
+	Spans = PrepareSpans({ Way, Branch }, {}, true, 0, 0);
+	TestEqual(TEXT("Omitted and explicit default lane counts can merge"), MergeSharedNodeSpans(Spans, SameStyle), 1);
+	Way.Tags.Add(TEXT("lanes"), TEXT("3"));
+	Branch.Tags.Add(TEXT("lanes"), TEXT("3"));
 	Source->LeftLanes = Source->RightLanes = { Driving, Sidewalk };
 	Spans = PrepareSpans({ Way, Branch }, {}, true, 0, 0);
 	Algo::Reverse(Spans[1].Positions);
 	Swap(Spans[1].StartKey, Spans[1].EndKey);
-	TestEqual(TEXT("Odd lane layouts cannot reverse during merging"), MergeStraightSpans(Spans, 10, SameStyle), 0);
+	TestEqual(TEXT("Odd lane layouts cannot reverse during merging"), MergeSharedNodeSpans(Spans, SameStyle), 0);
 	Way.Points.Append({ { 3, FVector(5000, 5000, 0), true }, { 1, FVector(0, 0, 0), true } });
 	Spans = PrepareSpans({ Way }, {}, true, 0, 0);
 	if (TestEqual(TEXT("Closed way splits into two spans"), Spans.Num(), 2))
@@ -168,7 +180,7 @@ bool FRoadConstructorImportTopologyTest::RunTest(const FString& Parameters)
 	FImportedRoadWay StraightC = make_way(102, {{ 1003, FVector(15000, 0, 0), true }, { 1002, FVector(10000, 0, 0), true }});
 	auto SameStyle = [](const FImportSpan&) -> URoadStyle* { return nullptr; };
 	Spans = PrepareSpans({ StraightA, StraightB, StraightC }, {}, true, 0, 0);
-	TestEqual(TEXT("Straight chain merges regardless of endpoint order"), MergeStraightSpans(Spans, 10, SameStyle), 2);
+	TestEqual(TEXT("Straight chain merges regardless of endpoint order"), MergeSharedNodeSpans(Spans, SameStyle), 2);
 	TestEqual(TEXT("Chain becomes one actor input"), Spans.Num(), 1);
 	if (Spans.Num() == 1)
 	{
@@ -180,36 +192,34 @@ bool FRoadConstructorImportTopologyTest::RunTest(const FString& Parameters)
 	}
 	StraightB.Points.Last().WorldLocation = FVector(5000, 5000, 0);
 	Spans = PrepareSpans({ StraightA, StraightB }, {}, true, 0, 0);
-	TestEqual(TEXT("90 degree connection stays a corner junction"), MergeStraightSpans(Spans, 10, SameStyle), 0);
+	TestEqual(TEXT("Two-arm bends merge without creating a junction"), MergeSharedNodeSpans(Spans, SameStyle), 1);
 	StraightB.Points.Last().WorldLocation = FVector(10000, 400, 0);
 	Spans = PrepareSpans({ StraightA, StraightB }, {}, true, 0, 0);
-	TestEqual(TEXT("Small deviation inside tolerance merges"), MergeStraightSpans(Spans, 10, SameStyle), 1);
-	Spans = PrepareSpans({ StraightA, StraightB }, {}, true, 0, 0);
-	TestEqual(TEXT("Stricter angle tolerance preserves the connection"), MergeStraightSpans(Spans, 1, SameStyle), 0);
+	TestEqual(TEXT("A shallow bend also merges"), MergeSharedNodeSpans(Spans, SameStyle), 1);
 	StraightB.Points.Last().WorldLocation = FVector(10000, 0, 0);
 	FImportedRoadWay ThirdArm = make_way(103, {{ 1001, FVector(5000, 0, 0), true }, { 1004, FVector(5000, 5000, 0), true }});
 	Spans = PrepareSpans({ StraightA, StraightB, ThirdArm }, {}, true, 0, 0);
-	TestEqual(TEXT("A branch prevents merging the two opposite arms"), MergeStraightSpans(Spans, 10, SameStyle), 0);
+	TestEqual(TEXT("A branch prevents merging the two opposite arms"), MergeSharedNodeSpans(Spans, SameStyle), 0);
 	URoadStyle* StyleA = NewObject<URoadStyle>();
 	URoadStyle* StyleB = NewObject<URoadStyle>();
 	StraightB.Tags.Add(TEXT("highway"), TEXT("primary"));
 	auto DifferentStyles = [&](const FImportSpan& Span) { return Span.Highway == TEXT("primary") ? StyleB : StyleA; };
 	Spans = PrepareSpans({ StraightA, StraightB }, {}, true, 0, 0);
-	TestEqual(TEXT("Different selected styles remain separate"), MergeStraightSpans(Spans, 10, DifferentStyles), 0);
+	TestEqual(TEXT("Different selected styles remain separate"), MergeSharedNodeSpans(Spans, DifferentStyles), 0);
 	// Empty override entries and different highway tags may still resolve to one asset.
 	Spans = PrepareSpans({ StraightA, StraightB }, {}, true, 0, 0);
-	TestEqual(TEXT("Different highway tags merge when their resolved style is identical"), MergeStraightSpans(Spans, 10, SameStyle), 1);
+	TestEqual(TEXT("Different highway tags merge when their resolved style is identical"), MergeSharedNodeSpans(Spans, SameStyle), 1);
 	StyleA->LeftLanes.SetNum(1);
 	StyleA->RightLanes.Reset();
 	Spans = PrepareSpans({ StraightA, StraightB }, {}, true, 0, 0);
 	Algo::Reverse(Spans[1].Positions);
 	Swap(Spans[1].StartKey, Spans[1].EndKey);
-	TestEqual(TEXT("Reversal cannot swap an asymmetric lane layout"), MergeStraightSpans(Spans, 10, [&](const FImportSpan&) { return StyleA; }), 0);
+	TestEqual(TEXT("Reversal cannot swap an asymmetric lane layout"), MergeSharedNodeSpans(Spans, [&](const FImportSpan&) { return StyleA; }), 0);
 	Spans = PrepareSpans({ StraightA, StraightB }, {}, true, 0, 0);
 	Spans[1].Positions[0].Z += 2;
-	TestEqual(TEXT("Separated elevations at aliased nodes cannot be joined"), MergeStraightSpans(Spans, 10, SameStyle), 0);
+	TestEqual(TEXT("Separated elevations at aliased nodes cannot be joined"), MergeSharedNodeSpans(Spans, SameStyle), 0);
 	Spans = PrepareSpans({ Loop }, {}, true, 0, 0);
-	TestEqual(TEXT("Merging cannot turn split loops into unsupported same-road junctions"), MergeStraightSpans(Spans, 45, SameStyle), 0);
+	TestEqual(TEXT("Merging cannot turn split loops into unsupported same-road junctions"), MergeSharedNodeSpans(Spans, SameStyle), 0);
 	FImportedRoadWay Footway = StraightA;
 	Footway.Tags.Add(TEXT("highway"), TEXT("footway"));
 	TestEqual(TEXT("Explicit highway filter includes footways"), PrepareSpans({ Footway }, { TEXT("footway") }, true, 0, 0).Num(), 1);
@@ -251,11 +261,18 @@ bool FRoadGeneratorChangeDetectionTest::RunTest(const FString& Parameters)
 		URoadProps* Props = NewObject<URoadProps>();
 		FRoadProp Prop{};
 		Prop.Spacing = 500;
+		Prop.Assets.Add(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")));
 		Props->Props.Add(Prop);
 		Style->BaseCurveProps = Props;
+		for (auto* Lanes : { &Style->LeftLanes, &Style->RightLanes })
+			for (FRoadLaneStyle& Lane : *Lanes) Lane.Props = nullptr;
+		URoadProps* LaneProps = NewObject<URoadProps>();
+		FRoadProp LaneProp = Prop;
+		LaneProp.Assets = { LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere")) };
+		LaneProps->Props.Add(LaneProp);
+		Style->LeftLanes[0].Props = LaneProps;
 		Generator->DefaultRoadStyle = Style;
 		Generator->HighwayFilter = { TEXT("residential") };
-		Generator->bMergeStraightRoads = false;
 		FImportedRoadWay Main, Branch;
 		Main.WayId = 1;
 		Main.Tags.Add(TEXT("highway"), TEXT("residential"));
@@ -268,8 +285,27 @@ bool FRoadGeneratorChangeDetectionTest::RunTest(const FString& Parameters)
 		{
 			AOsmRoadScene* Initial = Generator->GeneratedScene.Get();
 			const auto Junctions = Initial->Junctions;
-			// Real button clicks are separated by editor ticks. Labels/transactions can
-			// queue a deferred scene rebuild after the initial generation returns.
+			const auto Roads = Initial->Roads;
+			const FString Inputs = Generator->CachedRoadInputs;
+			TestFalse(TEXT("Successful generation establishes an input baseline"), Inputs.IsEmpty());
+			auto CountStyleProps = [](const AOsmRoadScene* Scene, const UObject* Mesh)
+			{
+				int32 Count = 0;
+				TArray<ARoadActor*> MeshRoads = Scene->Roads;
+				for (ARoadActor* Link : Scene->JunctionLinkRoads) MeshRoads.AddUnique(Link);
+				for (const ARoadActor* Road : MeshRoads)
+					for (const UActorComponent* Component : Road->GetComponents())
+						if (const auto* Instances = Cast<UInstancedStaticMeshComponent>(Component);
+							Instances && Instances->GetStaticMesh() == Mesh) Count += Instances->GetInstanceCount();
+				return Count;
+			};
+			const int32 BasePropCount = CountStyleProps(Initial, Prop.Assets[0]);
+			const int32 LanePropCount = CountStyleProps(Initial, LaneProp.Assets[0]);
+			TestTrue(TEXT("Native construction generates base-curve style props"), BasePropCount > 0);
+			TestTrue(TEXT("Native construction generates lane style props"), LanePropCount > 0);
+			TestTrue(TEXT("Native mesh rebuild succeeds with style props"), Initial->BuildSurfaceMeshes());
+			TestEqual(TEXT("Native rebuild replaces base props without duplication"), CountStyleProps(Initial, Prop.Assets[0]), BasePropCount);
+			TestEqual(TEXT("Native rebuild replaces lane props without duplication"), CountStyleProps(Initial, LaneProp.Assets[0]), LanePropCount);
 			{
 				TGuardValue<uint64> RestoreFrameCounter(GFrameCounter, GFrameCounter);
 				for (int32 Tick = 0; Tick < 3; ++Tick)
@@ -279,61 +315,73 @@ bool FRoadGeneratorChangeDetectionTest::RunTest(const FString& Parameters)
 					World->GetTimerManager().Tick(0.1f);
 				}
 			}
-			TestTrue(TEXT("Deferred editor callbacks do not solve unchanged junctions again"), Initial->Junctions == Junctions);
-			Initial->Roads[0]->SetActorLabel(TEXT("Renamed imported road"));
-			FTSTicker::GetCoreTicker().Tick(0.1f);
-			TestTrue(TEXT("Renaming a road does not solve junctions again"), Initial->Junctions == Junctions);
-			if (UStaticMeshComponent* Mesh = Cast<UStaticMeshComponent>(Initial->Roads[0]->GetRootComponent()))
-			{
-				UStaticMesh* OriginalMesh = Mesh->GetStaticMesh();
-				Mesh->SetStaticMesh(nullptr);
-				TestFalse(TEXT("Mesh-less spans still have an output fingerprint"), RoadGenerationSignatures::RoadOutput(Initial).IsEmpty());
-				Mesh->SetStaticMesh(OriginalMesh);
-			}
-			TestFalse(TEXT("Successful road output establishes a cache"), Generator->CachedRoadOutput.IsEmpty());
 			TestTrue(TEXT("Unchanged generation succeeds"), Generator->BuildRoads(Ways, NAME_None));
-			TestTrue(TEXT("Unchanged request retains the exact scene and roads"), Generator->GeneratedScene.Get() == Initial);
-			TestTrue(TEXT("Unchanged request does not solve junctions again"), Initial->Junctions == Junctions);
+			TestTrue(TEXT("Unchanged input retains roads and junctions"), Initial->Roads == Roads && Initial->Junctions == Junctions);
 			Generator->LandscapeHeightOffsetCm = 500;
-			Generator->LandscapeSplineSideFalloffCm = 250;
+			Generator->LandscapeSplineFalloffScale = 0.5;
 			Generator->JunctionRadiusCm = 12345; // Override is disabled.
-			Generator->StraightConnectionToleranceDegrees = 45; // Merging is disabled.
 			Generator->HighwayStyles.Add(TEXT("footway"), NewObject<URoadStyle>());
 			Ways[0].Tags.Add(TEXT("name"), TEXT("Unused generation tag"));
 			Algo::Reverse(Ways);
-			TestTrue(TEXT("Changes unrelated to road output succeed"), Generator->BuildRoads(Ways, NAME_None));
-			TestTrue(TEXT("Unused styles, terrain settings, disabled parameters and input ordering do not regenerate roads"), Generator->GeneratedScene.Get() == Initial);
+			TestTrue(TEXT("Unrelated input changes succeed"), Generator->BuildRoads(Ways, NAME_None));
+			TestEqual(TEXT("Unused settings and ordering preserve the input baseline"), Generator->CachedRoadInputs, Inputs);
+
+			// Asset contents are outside the importer/generator Details input contract.
 			Style->LeftLanes[0].Width += 25;
-			TestTrue(TEXT("An in-place source style edit regenerates"), Generator->BuildRoads(Ways, NAME_None));
-			TestTrue(TEXT("Style content changes replace road output"), Generator->GeneratedScene.Get() != Initial);
-			AOsmRoadScene* Previous = Generator->GeneratedScene.Get();
-			const FString PreviousInputs = Generator->CachedRoadInputs;
 			Props->Props[0].Spacing = 750;
-			TestTrue(TEXT("Referenced prop data edits regenerate"), Generator->BuildRoads(Ways, NAME_None));
-			TestTrue(TEXT("Referenced asset content participates in input detection"), Generator->CachedRoadInputs != PreviousInputs);
-			TestTrue(TEXT("Changed props replace output"), Generator->GeneratedScene.Get() != Previous);
-			Previous = Generator->GeneratedScene.Get();
+			TestTrue(TEXT("Referenced asset edits do not invalidate inputs"), Generator->BuildRoads(Ways, NAME_None));
+			TestTrue(TEXT("Asset edits retain the exact scene"), Generator->GeneratedScene.Get() == Initial);
+			TestEqual(TEXT("Asset contents are not hashed"), Generator->CachedRoadInputs, Inputs);
+
+			UInstancedStaticMeshComponent* Instances = nullptr;
+			for (ARoadActor* Road : Initial->Roads)
+				for (UActorComponent* Component : Road->GetComponents())
+					if (auto* Candidate = Cast<UInstancedStaticMeshComponent>(Component);
+						Candidate && Candidate->GetStaticMesh() == Prop.Assets[0] && Candidate->GetInstanceCount() > 0)
+						Instances = Candidate;
+			if (TestNotNull(TEXT("Native mesh construction generates style props"), Instances)) Instances->ClearInstances();
+			UStaticMeshComponent* RoadMesh = CastChecked<UStaticMeshComponent>(Roads[0]->GetRootComponent());
+			UStaticMeshComponent* JunctionMesh = CastChecked<UStaticMeshComponent>(Junctions[0]->GetRootComponent());
+			RoadMesh->SetStaticMesh(nullptr);
+			JunctionMesh->SetStaticMesh(nullptr);
+			Roads[0]->LastAppliedRoadStyle->LeftLanes[0].Width += 100;
+			Junctions[0]->SetActorLocation(Junctions[0]->GetActorLocation() + FVector(0, 0, 20));
+			TestTrue(TEXT("Output edits do not invalidate unchanged inputs"), Generator->BuildRoads(Ways, NAME_None));
+			TestTrue(TEXT("Output edits retain source roads and solved junctions"), Initial->Roads == Roads && Initial->Junctions == Junctions);
+			TestNull(TEXT("Manual road mesh removal is preserved"), RoadMesh->GetStaticMesh());
+			TestNull(TEXT("Manual junction mesh removal is preserved"), JunctionMesh->GetStaticMesh());
+			if (Instances) TestEqual(TEXT("Manual prop removal is preserved"), Instances->GetInstanceCount(), 0);
+
+			Generator->bRemoveCornersWithoutJunctionSurface = !Generator->bRemoveCornersWithoutJunctionSurface;
+			TestTrue(TEXT("Surface parameter changes rebuild dependent output"), Generator->BuildRoads(Ways, NAME_None));
+			TestTrue(TEXT("Surface parameter changes retain roads and junctions"), Initial->Roads == Roads && Initial->Junctions == Junctions);
+			TestTrue(TEXT("Changed input rebuilds the road mesh"), CastChecked<UStaticMeshComponent>(Roads[0]->GetRootComponent())->GetStaticMesh() != nullptr);
+			Generator->bOverrideJunctionRadius = true;
+			Generator->JunctionRadiusCm = 1500;
+			TestTrue(TEXT("Junction parameters rerun dependent stages"), Generator->BuildRoads(Ways, NAME_None));
+			TestTrue(TEXT("Junction parameter changes retain source roads"), Initial->Roads == Roads);
+			TestTrue(TEXT("Junction parameter changes replace solved junctions"), Initial->Junctions != Junctions);
+			Generator->DefaultRoadStyle = DuplicateObject<URoadStyle>(Style, Generator);
+			TestTrue(TEXT("Selecting another style regenerates roads"), Generator->BuildRoads(Ways, NAME_None));
+			TestTrue(TEXT("Style reference is a generator Details input"), Generator->GeneratedScene.Get() != Initial);
+			AOsmRoadScene* Previous = Generator->GeneratedScene.Get();
 			Ways[0].Points.Last().WorldLocation.Z += 20;
-			TestTrue(TEXT("Changed cached source coordinates regenerate"), Generator->BuildRoads(Ways, NAME_None));
-			TestTrue(TEXT("Source changes replace road output"), Generator->GeneratedScene.Get() != Previous);
+			TestTrue(TEXT("Changed importer coordinates regenerate"), Generator->BuildRoads(Ways, NAME_None));
+			TestTrue(TEXT("Importer changes replace road output"), Generator->GeneratedScene.Get() != Previous);
 			Previous = Generator->GeneratedScene.Get();
 			Generator->HighwayFilter = { TEXT("footway") };
 			AddExpectedError(TEXT("cache contains no usable roads"), EAutomationExpectedErrorFlags::Contains, 1);
-			TestFalse(TEXT("Unusable inputs do not overwrite the successful baseline"), Generator->BuildRoads(Ways, NAME_None));
-			TestTrue(TEXT("Failure preserves output"), Generator->GeneratedScene.Get() == Previous);
+			TestFalse(TEXT("Unusable inputs do not overwrite the baseline"), Generator->BuildRoads(Ways, NAME_None));
+			TestTrue(TEXT("Failure preserves the previous scene"), Generator->GeneratedScene.Get() == Previous);
 			Generator->HighwayFilter = { TEXT("residential") };
-			TestTrue(TEXT("Restored inputs reuse successful output"), Generator->BuildRoads(Ways, NAME_None));
-			TestTrue(TEXT("Failed generation did not replace the cache"), Generator->GeneratedScene.Get() == Previous);
-			Previous->Roads[0]->LastAppliedRoadStyle->LeftLanes[0].Width += 100;
-			TestTrue(TEXT("Edited output invalidates the no-change shortcut"), Generator->BuildRoads(Ways, NAME_None));
-			TestTrue(TEXT("Output edits are repaired"), Generator->GeneratedScene.Get() != Previous);
-			Previous = Generator->GeneratedScene.Get();
+			TestTrue(TEXT("Restored inputs reuse the successful baseline"), Generator->BuildRoads(Ways, NAME_None));
+			TestTrue(TEXT("Failure did not replace the cache"), Generator->GeneratedScene.Get() == Previous);
 			Previous->Roads[0]->Destroy();
-			TestTrue(TEXT("A deleted road invalidates the shortcut"), Generator->BuildRoads(Ways, NAME_None));
-			TestTrue(TEXT("Missing output is regenerated"), Generator->GeneratedScene.Get() != Previous);
+			TestTrue(TEXT("Deleted road output does not invalidate importer input"), Generator->BuildRoads(Ways, NAME_None));
+			TestTrue(TEXT("Output deletion does not replace the scene"), Generator->GeneratedScene.Get() == Previous);
 			Generator->ClearRoads();
-			TestTrue(TEXT("Clear resets the successful baseline"), Generator->CachedRoadInputs.IsEmpty());
-			TestTrue(TEXT("Generation works again after Clear"), Generator->BuildRoads(Ways, NAME_None));
+			TestTrue(TEXT("Clear resets the input baseline"), Generator->CachedRoadInputs.IsEmpty());
+			TestTrue(TEXT("Clear then generate explicitly rebuilds output"), Generator->BuildRoads(Ways, NAME_None));
 		}
 		Generator->ClearRoads();
 	}
@@ -380,8 +428,8 @@ bool FRoadGeneratorWayStylesTest::RunTest(const FString& Parameters)
 		if (TestTrue(TEXT("Roads build using per-way styles"), Generator->BuildRoads(Ways, NAME_None)))
 		{
 			AOsmRoadScene* Scene = Generator->GeneratedScene.Get();
-			TestEqual(TEXT("Different ways remain separate even with equal lane counts"), Scene->Roads.Num(), 6);
-			TestEqual(TEXT("Scene persistently owns every generated way style"), Scene->ImportedWayStyles.Num(), 5);
+			TestEqual(TEXT("Compatible ways merge at their two-arm shared node"), Scene->Roads.Num(), 5);
+			TestEqual(TEXT("Scene persistently owns every surviving way style"), Scene->ImportedWayStyles.Num(), 4);
 			TMap<int64, URoadStyle*> Styles;
 			int32 MainSpans = 0;
 			for (ARoadActor* Road : Scene->Roads)
@@ -394,28 +442,224 @@ bool FRoadGeneratorWayStylesTest::RunTest(const FString& Parameters)
 						TestTrue(TEXT("Split spans of one way share its style"), *Existing == Style);
 					else Styles.Add(Id, Style);
 					TestTrue(TEXT("Generated style belongs to the output scene"), Style && Style->GetOuter() == Scene);
-					TestTrue(TEXT("Road references the scene's serialized style"), Scene->ImportedWayStyles.FindRef(Id) == Style);
+					TestTrue(TEXT("Road references one of the scene's serialized styles"), Scene->ImportedWayStyles.FindKey(Style) != nullptr);
 					if (Id == 1) ++MainSpans;
 				}
 			}
 			TestEqual(TEXT("Junction splits the main way"), MainSpans, 2);
 			if (TestEqual(TEXT("Every source way has a generated style"), Styles.Num(), 5))
 			{
-				TestTrue(TEXT("Identical tags on different ways do not share styles"), Styles[1] != Styles[2]);
+				TestTrue(TEXT("Merged ways share the surviving way style"), Styles[1] == Styles[2]);
 				TestTrue(TEXT("Untagged and invalid roads also get independent styles"), Styles[3] != Primary && Styles[4] != Default && Styles[5] != Primary && Styles[3] != Styles[5]);
 				TestEqual(TEXT("Highway override settings are inherited"), Styles[3]->GeneratedRailingHeight, Primary->GeneratedRailingHeight);
 				TestEqual(TEXT("Empty highway override falls back to default settings"), Styles[4]->GeneratedRailingHeight, Default->GeneratedRailingHeight);
 				TestEqual(TEXT("Missing lane tag retains highway layout"), Styles[3]->LeftLanes.Num(), Primary->LeftLanes.Num());
 				TestEqual(TEXT("Invalid lane tag retains highway layout"), Styles[5]->RightLanes.Num(), Primary->RightLanes.Num());
 				const double BaseWidth = Default->LeftLanes[0].Width;
-				const double OtherWidth = Styles[2]->LeftLanes[0].Width;
+				const double OtherWidth = Styles[4]->LeftLanes[0].Width;
+				const double MergedWidth = Styles[2]->LeftLanes[0].Width;
 				Styles[1]->LeftLanes[0].Width += 25;
-				TestEqual(TEXT("Editing one way does not affect another"), Styles[2]->LeftLanes[0].Width, OtherWidth);
+				TestEqual(TEXT("Merged source IDs refer to the same editable style"), Styles[2]->LeftLanes[0].Width, MergedWidth + 25);
+				TestEqual(TEXT("Editing a merged road does not affect an unrelated way"), Styles[4]->LeftLanes[0].Width, OtherWidth);
 				TestEqual(TEXT("Editing generated styles does not affect the asset"), Default->LeftLanes[0].Width, BaseWidth);
 			}
 		}
 		Generator->ClearRoads();
 	}
+	World->DestroyWorld(false);
+	GEngine->DestroyWorldContext(World);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRoadGeneratorSharedNodeTest,
+	"Landscapes.RoadConstructor.SharedNodeConnections", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FRoadGeneratorSharedNodeTest::RunTest(const FString& Parameters)
+{
+	const UWorld::InitializationValues Init = UWorld::InitializationValues().AllowAudioPlayback(false).CreateNavigation(false).CreateAISystem(false);
+	UWorld* World = UWorld::CreateWorld(EWorldType::Editor, false, NAME_None, nullptr, true, ERHIFeatureLevel::Num, &Init);
+	if (!TestNotNull(TEXT("Shared-node world"), World)) return false;
+	GEngine->CreateNewWorldContext(EWorldType::Editor).SetCurrentWorld(World);
+	ARoadGenerator* Generator = World->SpawnActor<ARoadGenerator>();
+	auto MakeWay = [](int64 Id, FVector End)
+	{
+		FImportedRoadWay Way;
+		Way.WayId = Id;
+		Way.Tags.Add(TEXT("highway"), TEXT("residential"));
+		Way.Points = { { 10, FVector(0, 0, 100), true }, { Id + 100, End, true } };
+		return Way;
+	};
+	TArray<FImportedRoadWay> Ways = { MakeWay(1, FVector(-10000, 0, 100)), MakeWay(2, FVector(0, 10000, 100)) };
+	Algo::Reverse(Ways[0].Points);
+	for (int32 Degree = 2; Degree <= 4; ++Degree)
+	{
+		if (Degree == 3) Ways.Add(MakeWay(3, FVector(10000, 0, 100)));
+		if (Degree == 4) Ways.Add(MakeWay(4, FVector(0, -10000, 100)));
+		if (TestTrue(TEXT("Shared-node connection builds"), Generator->BuildRoads(Ways, NAME_None)))
+		{
+			AOsmRoadScene* Scene = Generator->GeneratedScene.Get();
+			TestEqual(TEXT("Only branching nodes produce junctions"), Scene->Junctions.Num(), Degree == 2 ? 0 : 1);
+			TestEqual(TEXT("Two same-style roads merge at any angle"), Scene->Roads.Num(), Degree == 2 ? 1 : Degree);
+			if (Degree == 2)
+			{
+				TestTrue(TEXT("Merged road retains both source IDs"), Scene->Roads[0]->Tags.Contains(TEXT("OSMWay_1")) && Scene->Roads[0]->Tags.Contains(TEXT("OSMWay_2")));
+				TestEqual(TEXT("The bend's shared node remains a curve control"), CastChecked<AOsmRoadActor>(Scene->Roads[0])->ImportedPositions.Num(), 3);
+			}
+		}
+	}
+	Ways.SetNum(2);
+	URoadStyle* Different = DuplicateObject<URoadStyle>(Generator->DefaultRoadStyle.Get(), Generator);
+	Different->LeftLanes[0].Width += 100;
+	Generator->HighwayStyles.Add(TEXT("primary"), Different);
+	Ways[1].Tags.Add(TEXT("highway"), TEXT("primary"));
+	for (bool bExpansion : { false, true })
+	for (bool bReverse : { false, true })
+	{
+		Ways[0].Tags.Add(TEXT("lanes"), bExpansion ? TEXT("2") : TEXT("4"));
+		Ways[1].Tags.Add(TEXT("lanes"), bExpansion ? TEXT("4") : TEXT("2"));
+		if (bReverse) Algo::Reverse(Ways[0].Points);
+		if (TestTrue(TEXT("Different styles build a native transition"), Generator->BuildRoads(Ways, NAME_None)))
+		{
+			AOsmRoadScene* Scene = Generator->GeneratedScene.Get();
+			TestEqual(TEXT("A transition is not a junction actor"), Scene->Junctions.Num(), 0);
+			TestEqual(TEXT("Two trimmed approaches and one transition are generated"), Scene->Roads.Num(), 3);
+			ARoadActor* Transition = nullptr;
+			for (ARoadActor* Road : Scene->Roads) if (Road->bEnableRoadTransitionPrototype) Transition = Road;
+			if (TestNotNull(TEXT("Native Road Transition is enabled"), Transition))
+			{
+				TestTrue(TEXT("Native transition receives a visible mesh"), CastChecked<UStaticMeshComponent>(Transition->GetRootComponent())->GetStaticMesh() != nullptr);
+				for (int32 Side = 0; Side < 2; ++Side)
+				{
+					const auto Lanes = Transition->GetLanes(Side);
+					const auto& Source = Side ? Transition->LastAppliedRoadStyle->LeftLanes : Transition->LastAppliedRoadStyle->RightLanes;
+					const auto& Target = Side ? Transition->RoadTransitionTargetStyle->LeftLanes : Transition->RoadTransitionTargetStyle->RightLanes;
+					for (int32 Index = 0; Index < Lanes.Num(); ++Index)
+					{
+						const URoadBoundary* Boundary = Lanes[Index]->GetBoundary(Side);
+						const int32 TargetIndex = Target.Num() - Source.Num() + Index;
+						TestTrue(TEXT("Transition starts at the source width"), FMath::IsNearlyEqual(Boundary->LocalOffsets[0].Offset, Source[Index].Width, 0.01));
+						TestTrue(TEXT("Transition ends at the target width"), FMath::IsNearlyEqual(Boundary->LocalOffsets.Last().Offset, Target.IsValidIndex(TargetIndex) ? Target[TargetIndex].Width : 0.0, 0.01));
+					}
+				}
+				const auto OriginalRoads = Scene->Roads;
+				TestTrue(TEXT("Unchanged transition generation succeeds"), Generator->BuildRoads(Ways, NAME_None));
+				TestTrue(TEXT("Unchanged generation preserves transition actors"), Scene->Roads == OriginalRoads);
+			}
+		}
+		if (bReverse) Algo::Reverse(Ways[0].Points);
+	}
+	Generator->ClearRoads();
+	World->DestroyWorld(false);
+	GEngine->DestroyWorldContext(World);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRoadGeneratorScenePartitionTest,
+	"Landscapes.RoadConstructor.ScenePartition", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FRoadGeneratorScenePartitionTest::RunTest(const FString& Parameters)
+{
+	const UWorld::InitializationValues Init = UWorld::InitializationValues().AllowAudioPlayback(false).CreateNavigation(false).CreateAISystem(false);
+	UWorld* World = UWorld::CreateWorld(EWorldType::Editor, false, NAME_None, nullptr, true, ERHIFeatureLevel::Num, &Init);
+	if (!TestNotNull(TEXT("Partition world"), World)) return false;
+	GEngine->CreateNewWorldContext(EWorldType::Editor).SetCurrentWorld(World);
+	ARoadGenerator* Generator = World->SpawnActor<ARoadGenerator>();
+	Generator->RoadSceneSizeCm = 10000;
+	Generator->SpawnedActorsPath = TEXT(" Generated\\Roads/ ");
+	URoadStyle* FolderStyle = DuplicateObject<URoadStyle>(Generator->DefaultRoadStyle.Get(), Generator);
+	URoadProps* FolderProps = NewObject<URoadProps>(FolderStyle);
+	FRoadProp FolderProp{};
+	FolderProp.Spacing = 2000;
+	FolderProp.Assets.Add(AStaticMeshActor::StaticClass());
+	FolderProps->Props.Add(FolderProp);
+	FolderStyle->BaseCurveProps = FolderProps;
+	Generator->DefaultRoadStyle = FolderStyle;
+	FImportedRoadWay Main, Branch;
+	Main.WayId = 1;
+	Main.Tags.Add(TEXT("highway"), TEXT("residential"));
+	Main.Points = { { 1, FVector(-8000, 0, 100), true }, { 2, FVector(0, 0, 100), true }, { 3, FVector(8000, 0, 100), true } };
+	Branch.WayId = 2;
+	Branch.Tags = Main.Tags;
+	Branch.Points = { { 2, FVector(0, 0, 100), true }, { 4, FVector(0, 8000, 100), true } };
+	const TArray<FImportedRoadWay> Ways = { Main, Branch };
+	if (TestTrue(TEXT("Partitioned network builds"), Generator->BuildRoads(Ways, NAME_None)))
+	{
+		const TArray<AOsmRoadScene*> Scenes = Generator->GetRoadScenes();
+		auto CheckFolders = [this, &Scenes](FName Expected)
+		{
+			int32 PropActors = 0;
+			for (AOsmRoadScene* Scene : Scenes)
+			{
+				for (TActorIterator<AActor> It(Scene->GetWorld()); It; ++It)
+				{
+					const AActor* Actor = *It;
+					if (!Actor->IsOwnedBy(Scene)) continue;
+					TestEqual(TEXT("Every generated actor uses the requested Outliner folder"), Actor->GetFolderPath(), Expected);
+					if (Actor->Tags.Contains(TEXT("RoadConstructor.GeneratedRoadPropActor"))) ++PropActors;
+				}
+			}
+			TestTrue(TEXT("Folder routing includes actual generated prop actors"), PropActors > 0);
+		};
+		CheckFolders(TEXT("Generated/Roads"));
+		TestEqual(TEXT("Junction and its three neighboring cells form four scenes"), Scenes.Num(), 4);
+		TestEqual(TEXT("Every scene is tracked for cleanup"), Generator->GetGeneratedObjects().Num(), 4);
+		int32 JunctionCount = 0, RoadCount = 0;
+		TMap<FString, TArray<AOsmRoadActor*>> Seams;
+		for (AOsmRoadScene* Scene : Scenes)
+		{
+			TestTrue(TEXT("Scene road count is limited for this fixture"), Scene->Roads.Num() <= 3);
+			RoadCount += Scene->Roads.Num();
+			JunctionCount += Scene->Junctions.Num();
+			for (const AJunctionActor* Junction : Scene->Junctions)
+				for (const FJunctionGate& Gate : Junction->Gates)
+					TestTrue(TEXT("Every junction gate belongs to the same scene"), Gate.Road && Gate.Road->GetScene() == Scene);
+			for (ARoadActor* Actor : Scene->Roads)
+			{
+				AOsmRoadActor* Road = CastChecked<AOsmRoadActor>(Actor);
+				TestTrue(TEXT("Source road has the correct owning scene"), Road->GetScene() == Scene);
+				TestTrue(TEXT("Source style is saved with its own scene"), Road->LastAppliedRoadStyle->GetOuter() == Scene);
+				if (Road->StartNodeKey.StartsWith(TEXT("SceneSeam:"))) Seams.FindOrAdd(Road->StartNodeKey).Add(Road);
+				if (Road->EndNodeKey.StartsWith(TEXT("SceneSeam:"))) Seams.FindOrAdd(Road->EndNodeKey).Add(Road);
+			}
+		}
+		TestEqual(TEXT("The real OSM junction is preserved once"), JunctionCount, 1);
+		TestEqual(TEXT("Three connecting spans are split into six roads"), RoadCount, 6);
+		TestEqual(TEXT("Three cross-scene seams are recorded"), Seams.Num(), 3);
+		for (const auto& Entry : Seams)
+			if (TestEqual(TEXT("A seam has exactly two road halves"), Entry.Value.Num(), 2))
+			{
+				AOsmRoadActor* A = Entry.Value[0], *B = Entry.Value[1];
+				const FVector AEnd = A->StartNodeKey == Entry.Key ? A->ImportedPositions[0] : A->ImportedPositions.Last();
+				const FVector BEnd = B->StartNodeKey == Entry.Key ? B->ImportedPositions[0] : B->ImportedPositions.Last();
+				TestTrue(TEXT("Road halves meet without a positional gap"), AEnd.Equals(BEnd, 0.01));
+				TestTrue(TEXT("Road halves belong to different scenes"), A->GetScene() != B->GetScene());
+			}
+		TestTrue(TEXT("Unchanged partitioned generation succeeds"), Generator->BuildRoads(Ways, NAME_None));
+		TestTrue(TEXT("Unchanged input retains every exact scene"), Generator->GetRoadScenes() == Scenes);
+		TMap<ARoadActor*, UStaticMesh*> OriginalMeshes;
+		for (AOsmRoadScene* Scene : Scenes)
+			for (ARoadActor* Road : Scene->Roads)
+				OriginalMeshes.Add(Road, CastChecked<UStaticMeshComponent>(Road->GetRootComponent())->GetStaticMesh());
+		Generator->SpawnedActorsPath = TEXT("Generated/Moved");
+		TestTrue(TEXT("Folder-only changes apply"), Generator->BuildRoads(Ways, NAME_None));
+		CheckFolders(TEXT("Generated/Moved"));
+		TestTrue(TEXT("Explicit output-folder override applies"), Generator->BuildRoads(Ways, TEXT("Pipeline/Roads")));
+		CheckFolders(TEXT("Pipeline/Roads"));
+		Generator->SpawnedActorsPath.Reset();
+		Generator->SetFolderPath(TEXT("Generator/Folder"));
+		TestTrue(TEXT("An empty path uses the generator folder"), Generator->BuildRoads(Ways, NAME_None));
+		CheckFolders(TEXT("Generator/Folder"));
+		TestTrue(TEXT("Folder changes preserve all scene actors"), Generator->GetRoadScenes() == Scenes);
+		for (const auto& Pair : OriginalMeshes)
+			TestTrue(TEXT("Folder changes preserve exact road meshes"), CastChecked<UStaticMeshComponent>(Pair.Key->GetRootComponent())->GetStaticMesh() == Pair.Value);
+		AddExpectedError(TEXT("cache contains no usable roads"), EAutomationExpectedErrorFlags::Contains, 1);
+		TestFalse(TEXT("Failed replacement preserves all existing scenes"), Generator->BuildRoads({}, NAME_None));
+		TestTrue(TEXT("Failed generation preserves every exact scene"), Generator->GetRoadScenes() == Scenes);
+		Generator->RoadSceneSizeCm = 100000;
+		TestTrue(TEXT("Scene size is a regeneration input"), Generator->BuildRoads(Ways, NAME_None));
+		TestEqual(TEXT("Larger cells reunite this network into one scene"), Generator->GetRoadScenes().Num(), 1);
+		for (const AOsmRoadScene* Previous : Scenes) TestTrue(TEXT("Replaced scenes are destroyed"), Previous->IsActorBeingDestroyed());
+	}
+	Generator->ClearRoads();
+	TestTrue(TEXT("Clear removes all generated scenes"), Generator->GetRoadScenes().IsEmpty() && Generator->GeneratedScenes.IsEmpty());
 	World->DestroyWorld(false);
 	GEngine->DestroyWorldContext(World);
 	return true;
@@ -467,10 +711,12 @@ bool FRoadGeneratorLandscapeRegenerationTest::RunTest(const FString& Parameters)
 	{
 		return SplineHeights().ContainsByPredicate([](uint16 Height) { return Height != 32768; });
 	};
+	Generator->RoadSceneSizeCm = 3000; // Exercise generation and clearing across multiple scenes.
 	Generator->TargetLandscape = Landscape;
 	Generator->SurfaceOffsetCm = 0;
 	Generator->LandscapeHeightOffsetCm = 50;
-	Generator->LandscapeSplineSideFalloffCm = 175;
+	Generator->LandscapeSplineFalloffScale = 0.25;
+	Generator->LandscapeSplineStartFalloffCm = 250;
 	Generator->LandscapeSplineEndFalloffCm = 250;
 	URoadStyle* Style = DuplicateObject<URoadStyle>(Generator->DefaultRoadStyle.Get(), Generator);
 	FRoadLaneStyle Driving, Shoulder, Sidewalk;
@@ -488,14 +734,29 @@ bool FRoadGeneratorLandscapeRegenerationTest::RunTest(const FString& Parameters)
 	Way.Tags.Add(TEXT("highway"), TEXT("residential"));
 	Way.Tags.Add(TEXT("lanes"), TEXT("3"));
 	Way.Points = { { 1, FVector(1000, 3000, 1000), true }, { 2, FVector(5000, 3000, 1000), true } };
-	const TArray<FImportedRoadWay> CachedWays = { Way };
+	FImportedRoadWay SecondWay = Way;
+	SecondWay.WayId = 101;
+	for (FImportedRoadPoint& Point : SecondWay.Points)
+	{
+		Point.NodeId += 10;
+		Point.WorldLocation.Y = 2000;
+	}
+	const TArray<FImportedRoadWay> CachedWays = { Way, SecondWay };
 	TestNotNull(TEXT("Generate Landscape Splines button"), Generator->FindFunction(TEXT("GenerateLandscapeSplines")));
 	TestNotNull(TEXT("Clear Landscape Splines button"), Generator->FindFunction(TEXT("ClearLandscapeSplines")));
+	const TArray<FName> LayerOptions = Generator->GetLandscapeSplineEditLayerOptions();
+	TestEqual(TEXT("Only Splines is offered as a layer"), LayerOptions.Num(), 1);
+	TestTrue(TEXT("The layer option is Splines"), LayerOptions.Contains(TEXT("Splines")));
 	if (TestTrue(TEXT("Generate Roads builds road output alone"), Generator->BuildRoads(CachedWays, NAME_None)))
 	{
 		TestNull(TEXT("Road generation does not create a spline layer"), Landscape->FindEditLayerOfTypeConst(ULandscapeEditLayerSplines::StaticClass()));
+		AddExpectedError(TEXT("Splines is occupied by a non-spline layer"), EAutomationExpectedErrorFlags::Contains, 1);
+		TestFalse(TEXT("A sculpt layer named Splines is rejected"), Generator->GenerateLandscapeSplinesInternal());
+		TestEqual(TEXT("Rejected generation preserves the sculpt layer name"), SculptLayer->GetName(), FName(TEXT("Splines")));
+		SculptLayer->SetName(TEXT("Sculpt"), true);
 		if (TestTrue(TEXT("Separate spline generation succeeds"), Generator->GenerateLandscapeSplinesInternal()))
 		{
+			TestEqual(TEXT("The reserved layer is named Splines"), Landscape->FindEditLayerOfTypeConst(ULandscapeEditLayerSplines::StaticClass())->GetName(), FName(TEXT("Splines")));
 			ULandscapeSplinesComponent* Splines = Landscape->GetSplinesComponent();
 			const int32 InitialCount = Splines->GetControlPoints().Num();
 			TestTrue(TEXT("Native control points were generated"), InitialCount >= 2);
@@ -504,10 +765,11 @@ bool FRoadGeneratorLandscapeRegenerationTest::RunTest(const FString& Parameters)
 			{
 				for (const ULandscapeSplineControlPoint* Point : Splines->GetControlPoints())
 				{
-					TestEqual(TEXT("Driving and Shoulder lanes set the half-width"), Point->Width, 600.0f);
-					TestEqual(TEXT("Side falloff is applied"), Point->SideFalloff, static_cast<float>(Generator->LandscapeSplineSideFalloffCm));
+					TestEqual(TEXT("All lanes, including sidewalks, set the scaled half-width"), Point->Width, static_cast<float>(2800.0 * Generator->LandscapeSplineWidthScale));
+					TestEqual(TEXT("Side falloff scale is applied"), Point->SideFalloff, static_cast<float>(FMath::Clamp(GetDefault<ARoadActor>()->TerrainDeformFalloffDistance * Generator->LandscapeSplineFalloffScale, 25.0, 3500.0)));
 					TestEqual(TEXT("Endpoint falloff is applied"), Point->EndFalloff,
-						Point->ConnectedSegments.Num() <= 1 ? static_cast<float>(Generator->LandscapeSplineEndFalloffCm) : 0.0f);
+						Point->ConnectedSegments.Num() == 1 ? static_cast<float>(Point->ConnectedSegments[0].End == 0 ?
+							Generator->LandscapeSplineStartFalloffCm : Generator->LandscapeSplineEndFalloffCm) : 0.0f);
 					TestTrue(TEXT("Spline height uses the imported baseline and its independent offset"),
 						FMath::IsNearlyEqual(Splines->GetComponentTransform().TransformPosition(Point->Location).Z, Height, 0.1));
 				}
@@ -520,20 +782,20 @@ bool FRoadGeneratorLandscapeRegenerationTest::RunTest(const FString& Parameters)
 			TestTrue(TEXT("Unchanged spline generation preserves exact controls"), Splines->GetControlPoints() == OriginalPoints);
 			TestTrue(TEXT("Unchanged spline generation preserves exact deformation"), SplineHeights() == OriginalDeformation);
 			const AOsmRoadScene* UnchangedRoadScene = Generator->GeneratedScene.Get();
-			Generator->LandscapeSplineSideFalloffCm = 200;
+			Generator->LandscapeSplineFalloffScale = 0.3;
 			TestTrue(TEXT("Terrain settings do not regenerate roads"), Generator->BuildRoads(CachedWays, NAME_None));
 			TestTrue(TEXT("Road cache excludes terrain parameters"), Generator->GeneratedScene.Get() == UnchangedRoadScene);
 			TestTrue(TEXT("Changed falloff regenerates splines"), Generator->GenerateLandscapeSplinesInternal());
 			TestTrue(TEXT("Changed falloff replaces the previous controls"), Splines->GetControlPoints() != OriginalPoints);
 			TestTrue(TEXT("Spline changes never regenerate roads"), Generator->GeneratedScene.Get() == UnchangedRoadScene);
-			Generator->LandscapeSplineSideFalloffCm = 175;
+			Generator->LandscapeSplineFalloffScale = 0.25;
 			TestTrue(TEXT("Restoring falloff updates the output baseline"), Generator->GenerateLandscapeSplinesInternal());
 			const auto RetainedPoints = Splines->GetControlPoints();
 			// Simulate a level saved before independent prefix ownership was introduced.
 			Generator->GeneratedSplinePrefixes.Reset();
 			Generator->SurfaceOffsetCm = 12;
 			Generator->TargetLandscape = nullptr;
-			Generator->LandscapeSplineSideFalloffCm = -1; // Invalid terrain settings must not block roads.
+			Generator->LandscapeSplineFalloffScale = -1; // Invalid terrain settings must not block roads.
 			TestTrue(TEXT("Road regeneration needs no valid terrain settings"), Generator->BuildRoads(CachedWays, NAME_None));
 			TestTrue(TEXT("Road regeneration preserves exact spline objects"), Splines->GetControlPoints() == RetainedPoints);
 			TestTrue(TEXT("Road regeneration preserves exact deformation"), SplineHeights() == OriginalDeformation);
@@ -549,7 +811,8 @@ bool FRoadGeneratorLandscapeRegenerationTest::RunTest(const FString& Parameters)
 			AOsmRoadScene* CurrentScene = Generator->GeneratedScene.Get();
 			Generator->TargetLandscape = Landscape;
 			Generator->LandscapeHeightOffsetCm = -25;
-			Generator->LandscapeSplineSideFalloffCm = 0;
+			Generator->LandscapeSplineFalloffScale = 0.05;
+			Generator->LandscapeSplineStartFalloffCm = 0;
 			Generator->LandscapeSplineEndFalloffCm = 0;
 			Generator->SurfaceOffsetCm = 300; // Mesh was generated at +12, not this new value.
 			TestTrue(TEXT("Spline generation uses the saved mesh offset"), Generator->GenerateLandscapeSplinesInternal());
@@ -568,6 +831,56 @@ bool FRoadGeneratorLandscapeRegenerationTest::RunTest(const FString& Parameters)
 			TestTrue(TEXT("Failed replacement preserves deformation"), SplineHeights() == ValidDeformation);
 			Generator->LandscapeSplineEndFalloffCm = 0;
 
+			// Each exposed Terrain Deform setting must reach every road and its native controls.
+			Generator->LandscapeSplineWidthScale = 0.75;
+			Generator->LandscapeSplineFalloffScale = 1.5;
+			Generator->LandscapeSplineStartFalloffCm = 125;
+			Generator->LandscapeSplineEndFalloffCm = 375;
+			Generator->LandscapeSplineStartExtensionCm = 200;
+			Generator->LandscapeSplineEndExtensionCm = 600;
+			Generator->TerrainDeformTargetLandscapeSplineEditLayer = TEXT("Landscape Spline");
+			AddExpectedError(TEXT("Spline Edit Layer must be Splines"), EAutomationExpectedErrorFlags::Contains, 1);
+			TestFalse(TEXT("Alternate layer names are rejected"), Generator->GenerateLandscapeSplinesInternal());
+			TestTrue(TEXT("Rejected layer selection preserves controls"), Splines->GetControlPoints() == ValidPoints);
+			Generator->TerrainDeformTargetLandscapeSplineEditLayer = TEXT("Splines");
+			for (ARoadActor* Road : CurrentScene->Roads)
+				Road->TerrainDeformFalloffDistance = 100; // Simulate the removed custom distance control.
+			TestTrue(TEXT("Global Terrain Deform settings regenerate splines"), Generator->GenerateLandscapeSplinesInternal());
+			CheckDimensions(1150);
+			for (const ARoadActor* Road : CurrentScene->Roads)
+			{
+				TestTrue(TEXT("Terrain Deform is enabled on every road"), Road->bEnableTerrainDeform);
+				TestEqual(TEXT("Every road receives the width scale"), Road->TerrainDeformLandscapeSplineWidthScale, 0.75);
+				TestEqual(TEXT("Every road receives the falloff scale"), Road->TerrainDeformLandscapeSplineFalloffScale, 1.5);
+				TestEqual(TEXT("Every road uses the plugin default falloff distance"), Road->TerrainDeformFalloffDistance, GetDefault<ARoadActor>()->TerrainDeformFalloffDistance);
+				TestEqual(TEXT("Every road receives the start falloff"), Road->TerrainDeformLandscapeSplineStartFalloff, 125.0);
+				TestEqual(TEXT("Every road receives the end falloff"), Road->TerrainDeformLandscapeSplineEndFalloff, 375.0);
+				TestEqual(TEXT("Every road receives the start extension"), Road->TerrainDeformLandscapeSplineStartExtension, 200.0);
+				TestEqual(TEXT("Every road receives the end extension"), Road->TerrainDeformLandscapeSplineEndExtension, 600.0);
+				TestEqual(TEXT("Every road receives the layer"), Road->TerrainDeformTargetLandscapeSplineEditLayer, FName(TEXT("Splines")));
+				TestEqual(TEXT("Every road receives the independent height offset"), Road->TerrainDeformLandscapeSplineHeightOffset, 138.0);
+			}
+			bool bFoundStartExtension = false, bFoundEndExtension = false;
+			for (const ULandscapeSplineControlPoint* Point : Splines->GetControlPoints())
+			{
+				const double X = Splines->GetComponentTransform().TransformPosition(Point->Location).X;
+				bFoundStartExtension |= FMath::IsNearlyEqual(X, 800.0, 1.0);
+				bFoundEndExtension |= FMath::IsNearlyEqual(X, 5600.0, 1.0);
+			}
+			TestTrue(TEXT("Native controls retain the start extension"), bFoundStartExtension);
+			TestTrue(TEXT("Native controls retain the end extension"), bFoundEndExtension);
+			const auto ConfiguredPoints = Splines->GetControlPoints();
+			TestTrue(TEXT("Unchanged global settings reuse splines"), Generator->GenerateLandscapeSplinesInternal());
+			TestTrue(TEXT("Unchanged settings preserve controls"), Splines->GetControlPoints() == ConfiguredPoints);
+			Generator->LandscapeSplineWidthScale = 0.8;
+			FPropertyChangedEvent WidthEdit(FindFProperty<FProperty>(ARoadGenerator::StaticClass(),
+				GET_MEMBER_NAME_CHECKED(ARoadGenerator, LandscapeSplineWidthScale)), EPropertyChangeType::ValueSet);
+			Generator->PostEditChangeProperty(WidthEdit);
+			TestTrue(TEXT("Details edits preserve controls until generation is requested"), Splines->GetControlPoints() == ConfiguredPoints);
+			TestTrue(TEXT("Details edits preserve generated roads"), Generator->GeneratedScene.Get() == CurrentScene);
+			TestTrue(TEXT("The spline button applies pending Details edits"), Generator->GenerateLandscapeSplinesInternal());
+			CheckDimensions(1150);
+
 			ARoadGenerator* Other = World->SpawnActor<ARoadGenerator>();
 			if (TestNotNull(TEXT("Second independent generator"), Other))
 			{
@@ -582,6 +895,9 @@ bool FRoadGeneratorLandscapeRegenerationTest::RunTest(const FString& Parameters)
 				TestTrue(TEXT("Clearing splines preserves road output"), Generator->GeneratedScene.Get() == CurrentScene);
 				TestEqual(TEXT("Clearing splines preserves the other generator's points"), Splines->GetControlPoints().Num(), OtherPointCount);
 				TestTrue(TEXT("The other generator's deformation remains"), HasDeformation());
+				TestTrue(TEXT("Owned splines can be regenerated after clearing"), Generator->GenerateLandscapeSplinesInternal());
+				Generator->ClearLandscapeSplines();
+				TestEqual(TEXT("Clearing preserves the other generator's controls"), Splines->GetControlPoints().Num(), OtherPointCount);
 				Other->ClearLandscapeSplines();
 				Other->ClearRoads();
 			}
@@ -590,7 +906,7 @@ bool FRoadGeneratorLandscapeRegenerationTest::RunTest(const FString& Parameters)
 		}
 	}
 	TestTrue(TEXT("Original sculpt layer data is preserved"), ReadHeights(SculptGuid) == BaseHeights);
-	TestEqual(TEXT("Original sculpt layer name is preserved"), Landscape->GetEditLayerConst(SculptGuid)->GetName(), FName(TEXT("Splines")));
+	TestEqual(TEXT("Generation preserves the explicitly renamed sculpt layer"), Landscape->GetEditLayerConst(SculptGuid)->GetName(), FName(TEXT("Sculpt")));
 	TestEqual(TEXT("Cached input elevations are unchanged"), CachedWays[0].Points[0].WorldLocation.Z, 1000.0);
 	Generator->ClearLandscapeSplines();
 	Generator->ClearRoads();

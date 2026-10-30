@@ -27,7 +27,7 @@
 #include "ImageDownloader/Transformers/HMReproject.h"
 #include "ImageDownloader/Transformers/HMEnsureOneBand.h"
 #include "ImageDownloader/Transformers/HMCrop.h"
-#include "ImageDownloader/Transformers/HMPercentResolution.h"
+#include "HMRescaleMap.h"
 #include "ImageDownloader/Transformers/HMToPNG.h"
 #include "ImageDownloader/Transformers/HMMerge.h"
 #include "ImageDownloader/Transformers/HMReadCRS.h"
@@ -516,7 +516,7 @@ HMFetcher* UMapDownloader::CreateFetcher(
 
 	if (bScaleResolution)
 	{
-		Result = Result->AndThen(new HMDebugFetcher("PercentResolution", new HMPercentResolution(Name, PrecisionPercent)));
+		Result = Result->AndThen(new HMDebugFetcher("RescaleMap", new HMRescaleMap(Name, PrecisionPercent, ResamplingMethod)));
 	}
 
 	return Result;

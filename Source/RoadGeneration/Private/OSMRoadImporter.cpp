@@ -26,9 +26,19 @@ DEFINE_LOG_CATEGORY_STATIC(LogOSMRoadImporter, Log, All);
 
 namespace OsmRoadImporterInternal
 {
-	static bool ParseRoadXml(const FString& Text, TMap<int64, FSourceRoadNode>& Nodes, TArray<FSourceRoadWay>& Ways)
+	bool ParseRoadXml(const FString& Text, TMap<int64, FSourceRoadNode>& Nodes, TArray<FSourceRoadWay>& Ways)
 	{
-		FXmlFile Xml(Text, EConstructMethod::ConstructFromBuffer);
+		FString XmlText = Text.TrimStart();
+		// Overpass Turbo can put <?xml ...?><osm ...> on one line. FXmlFile
+		// discards the declaration's line, including that root tag. The file has
+		// already been decoded to FString, so the encoding declaration is redundant.
+		if (XmlText.StartsWith(TEXT("<?xml"), ESearchCase::CaseSensitive) && XmlText.Len() > 5 && FChar::IsWhitespace(XmlText[5]))
+		{
+			const int32 DeclarationEnd = XmlText.Find(TEXT("?>"), ESearchCase::CaseSensitive);
+			if (DeclarationEnd == INDEX_NONE) return false;
+			XmlText.RightChopInline(DeclarationEnd + 2);
+		}
+		FXmlFile Xml(XmlText, EConstructMethod::ConstructFromBuffer);
 		const FXmlNode* Root = Xml.GetRootNode();
 		if (!Xml.IsValid() || !Root || Root->GetTag() != TEXT("osm")) return false;
 		for (const FXmlNode* Element : Root->GetChildrenNodes())
@@ -37,7 +47,8 @@ namespace OsmRoadImporterInternal
 			{
 				FSourceRoadNode Node;
 				int64 Id = 0;
-				if (!LexTryParseString(Id, *Element->GetAttribute(TEXT("id"))) ||
+				if (
+					!LexTryParseString(Id, *Element->GetAttribute(TEXT("id"))) ||
 					!LexTryParseString(Node.Longitude, *Element->GetAttribute(TEXT("lon"))) ||
 					!LexTryParseString(Node.Latitude, *Element->GetAttribute(TEXT("lat")))) return false;
 				Nodes.Add(Id, Node);

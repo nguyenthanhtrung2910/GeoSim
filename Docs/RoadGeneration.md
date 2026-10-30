@@ -29,10 +29,11 @@ after reopening the level.
 3. Choose **Default Road Style**. The initial default is Road Constructor's
    `RS_Street_2Lane`, including its sidewalk profiles. Use **Highway Styles** to select
    different styles for OSM `highway` values such as `residential`, `primary`, or `service`.
-4. Click **Generate Roads**. **Clear Roads** deletes this generator's scene and children;
+4. Set **Spawned Actors Path** to a World Outliner folder such as `Generated/Roads`,
+   or leave it empty to use the generator's folder. Click **Generate Roads**. **Clear Roads** deletes this generator's scene and children;
    the importer cache and Landscape splines are retained. A failed replacement keeps the previous scene.
 5. To deform terrain, assign **Target Landscape** and click **Generate Landscape Splines**.
-   **Clear Landscape Splines** removes only this generator's splines and deformation.
+   **Clear Landscape Spline Points** removes only this generator's splines and deformation.
 
 For existing levels, the former RoadConstructorFromSplineImporter actor redirects to
 RoadGenerator. Create and assign an OSMRoadImporter with the old source, bounds and
@@ -44,10 +45,11 @@ Styles determine lane widths, sidewalks, materials and props. A positive integer
 the extra lane on the left for odd totals (for example, 3 means 2 left and 1 right).
 Existing driving lanes retain their attributes; extra lanes copy the outermost driving
 lane on that side, borrowing from the opposite side if needed. Non-driving lanes and
-all other style settings are retained. Every OSM way gets its own copy of its selected
+all other style settings are retained. Generated roads receive copies of their selected
 Highway Style, falling back to Default Road Style for missing or empty highway entries.
-Spans split from one way share that copy; different ways remain independent even with
-identical tags. Generated styles are embedded in the output scene; source assets are
+Spans split from one surviving way share that copy; ways merged at two-arm nodes share
+the surviving style and retain all source IDs in tags. Unrelated ways remain independent.
+Generated styles are embedded in the output scene; source assets are
 unchanged and no separate style asset is created. Missing, invalid,
 zero, or excessive counts (over 64) retain the highway style's original layout, as do
 styles with no Driving lane to copy. OSM `width`, `oneway`, and directional lane tags
@@ -59,11 +61,12 @@ this persistence fix, refresh the importer cache, click **Generate Roads**, then
 to replace missing style references. Rebuilding code alone cannot restore unsaved styles.
 
 **Surface Offset Cm** controls road mesh elevation relative to the cached imported points.
-**Landscape Height Offset Cm** independently controls Landscape spline elevation relative to
+**Roadbed Height Offset** independently controls Landscape spline elevation relative to
 those same points. Both accept negative values. For imported Z = 1,000 cm, Surface Offset =
 20 cm and Landscape Height Offset = -10 cm produce road controls at 1,020 cm and spline
 controls at 990 cm. Apply mesh changes with **Generate Roads** and terrain changes with
-**Generate Landscape Splines**. Neither operation moves the other output.
+**Generate Landscape Splines**. Details edits wait for the corresponding generation button.
+Neither operation moves the other output.
 
 ## Landscape deformation and debugging
 
@@ -77,15 +80,22 @@ copy of road controls.
 
 **Create Spline Layer If Missing** creates a reserved Landscape Splines edit layer when
 needed; otherwise provide that layer yourself.
-The generated road actors expose Road Constructor's width, falloff, extension and other Terrain
-Deform settings for subsequent manual adjustment.
+The generator's **Terrain Deform** category applies settings to every generated road.
+**Generate Landscape Splines** applies deformation; **Clear Landscape Spline Points**
+removes it. There is no Enable checkbox. **Spline Edit Layer** accepts only **Splines**,
+which must be the reserved
+spline layer type. An ordinary sculpt layer named Splines is rejected without being renamed
+or overwritten. Rename conflicting layers yourself before generating.
 
-The deformation corridor's full width is the sum of the generated style's **Driving**
-and **Shoulder** lane widths on both sides. Sidewalks, verges, medians, and other roles
-are excluded. Unreal stores half this total in each control point's **Half-Width**.
-**Landscape Spline Side Falloff Cm** sets the blend distance on each side (default 700 cm).
-**Landscape Spline End Falloff Cm** sets the blend distance at open endpoints (default
-2,000 cm). Both accept zero. Click **Generate Landscape Splines** to apply changed values. The reserved layer
+The deformation corridor includes **all lane types** on both sides, including sidewalks,
+verges, and medians. **Road Width Scale** follows RoadActor's convention: the default 0.5
+stores half the total lane width in each control point's **Half-Width**.
+**Side Falloff Scale** uses Road Constructor's native behavior: it multiplies the plugin's
+default base distance (700 cm), with scale limited to 0.05–3 and final distance clamped to
+25–3,500 cm. The default scale of 1 produces 700 cm. There is no separate distance control.
+**Start Falloff** and **End Falloff** set separate endpoint blend distances (default 2,000 cm).
+**Start Extension** and **End Extension** extend the full-width corridor before those blends
+(default 1,000 cm). Distances accept zero. The reserved layer
 is rebuilt from the final spline dimensions so the plugin's preliminary wider stamps
 do not remain in the terrain.
 Spline control heights are taken from the processed imported centreline plus Landscape Height
@@ -108,7 +118,7 @@ across a gap when **Require Terrain Samples** is enabled.
 replace, delete, or reapply Landscape splines or deformation, and do not require a Target
 Landscape. The former **Generate Landscape Splines With Roads** toggle is removed.
 **Generate Landscape Splines** replaces this generator's previously tracked splines using
-the current roads. **Clear Landscape Splines** removes them and rebuilds the reserved
+the current roads. **Clear Landscape Spline Points** removes them and rebuilds the reserved
 layer, preserving original sculpt layers and other generators' splines. Spline ownership
 is saved independently, so clearing or regenerating roads does not prevent later spline
 cleanup. Clearing either output does not clear the importer's cache.
@@ -117,32 +127,72 @@ Deformation uses a layer whose class is `ULandscapeEditLayerSplines`, rather tha
 its display name. Earlier output stamped into an ordinary sculpt layer cannot be separated
 from that layer's original heights automatically; restore that layer from Undo or a backup.
 
+**Spawned Actors Path** applies to every generated scene, road, junction, connector,
+transition, and attached prop actor. It is a World Outliner folder, not a filesystem path.
+An explicit generation/pipeline folder override takes priority. After editing only this
+path, click **Generate Roads** to relocate existing output while retaining its actors and meshes.
+
+## RoadScene ownership and editing
+
+**Road Scene Size Cm** assigns junction ownership to a spatial grid (default 100,000 cm,
+or 1 km). All road ends at one OSM junction stay in the same scene. A span joining nodes
+in different cells is split halfway along its imported polyline, with both halves meeting
+at the same position. This avoids splitting a junction across scene ownership boundaries.
+It is an ownership grid, not a hard limit on road count or scene bounds: long roads can
+extend beyond their owning cell. Cuts can affect curve fitting and style-prop spacing.
+
+The generator tracks every scene under **Generated Scenes**. Generate Roads replaces
+previous output only after all candidate scenes build successfully. Clear Roads removes
+all owned scenes; Landscape spline generation and clearing cover all of them. Previously
+saved single-scene output remains recognized and is replaced on the next generation.
+
+Imported roads now retain native property-edit, movement, and undo/redo behavior.
+Connected-road undo may refresh its entire owning scene, while other scenes remain
+unchanged by that callback. Loading/BeginPlay still preserve saved imported output.
+Native shared-style live updates can touch multiple scenes, and native Props asset
+callbacks can rebuild a scene independently of the generator.
+
 ## Generation change checks
 
-Both generation buttons compare input and output fingerprints before rebuilding.
-Unchanged road requests reuse the same scene, roads, and junctions; unchanged Landscape
-spline requests retain their existing control points, segments, and deformation.
-Deferred editor callbacks use the same output checks, so actor-label changes and queued
-notifications do not cause a second junction solve or invalidate the generator cache.
+**Generate Roads** compares only selected importer data and relevant parameters in
+RoadGenerator's Details panel. It does not hash generated curves, junctions, surface
+meshes, or props. Unchanged inputs retain the existing scene and its output, including
+manual edits and deletions. Imported roads use native editor callbacks for property
+edits, movement, and undo/redo. Connected-road undo can refresh the owning RoadScene;
+load/play callbacks continue to preserve saved output.
 
-Road inputs include selected cached ways, relevant settings, effective highway styles,
-and authored data in referenced Road Constructor props/profile assets. Unused highway
-styles, terrain settings, and parameters for disabled road features do not invalidate
-road output. Source coordinates and in-place style or prop edits do invalidate it.
-Missing or edited output also prevents reuse. A failed generation retains the previous
-successful baseline. Changing road inputs rebuilds the road stage, including junctions;
-terrain changes are applied only by the separate Landscape spline button.
+Road inputs include selected cached ways, active road settings, effective highway style
+references and actor label. Output folder changes relocate actors without rebuilding geometry. The contents of referenced RoadStyle, Props,
+and profile assets are not hashed. Selecting a different effective style triggers road
+preparation; editing the contents of the same asset does not. Unused highway styles,
+terrain settings, and parameters for disabled features do not invalidate road generation.
 
-Fingerprints are held for the current editor session. The first generation after loading
-establishes a baseline; Clear discards the corresponding baseline. Mesh and material
-asset resources remain managed by Unreal, while changes to their style references are
-included in the comparisons. To force a complete rebuild, clear that output and generate again.
+The stages still run in dependency order:
+
+1. **Prepare road curves:** importer data, style selection, or road shape/placement
+   parameter changes create source roads and curves. Failed replacement preserves the
+   previous scene.
+2. **Solve junctions:** new source roads or changed junction parameters determine shared-node
+   gates and cuts. Junction-only changes retain source roads.
+3. **Build surface meshes:** new junction solutions or changed corner-removal policy rebuild
+   road, connector, and junction surfaces. Native Road Constructor mesh construction also
+   generates props from the applied style, including base-curve and lane Props settings.
+   There is no separate prop-generation stage or custom prop-output tracking.
+
+Input baselines are recorded only after every requested stage succeeds. They last for the
+current editor session; the first generation after loading establishes a baseline.
+Use **Clear Roads** followed by **Generate Roads** to force a rebuild after manual output
+changes or edits inside referenced assets. The installed plugin's asset editors can still
+invoke their own native rebuild callbacks independently of this adapter.
+
+Landscape spline generation retains its separate input/output validation. Terrain settings
+apply only through **Generate Landscape Splines**; editing **Terrain Deform** does not regenerate output.
 
 ## Connectivity and output
 
 Shared positive OSM node IDs determine connectivity. Ways are split at shared nodes,
 so their junction endpoints remain fixed while Road Constructor rounds interior controls.
-Positions alone never create a junction. **Highway Filter** is the only tag-based
+Only nodes with at least three connecting road arms create junctions; positions alone never create a junction. **Highway Filter** is the only tag-based
 selection rule: listed `highway` values are included, and an empty list includes all
 highway values. There are no built-in exclusions for road classes, bridges, tunnels,
 nonzero layers, or areas. Assign base styles in **Highway Styles**. Layer values still
@@ -160,18 +210,20 @@ author tangents if such a road must curve. Regenerate roads after changing this 
 radius fitting to Road Constructor. Enable it to seed links with **Junction Radius Cm**;
 the plugin still solves the final corner radii and cut distances. Regenerate roads after
 changing this option.
-Separately, **Merge Straight Roads** joins compatible spans before Road Constructor actors
-are created. **Straight Connection Tolerance Degrees** defaults to 10 degrees from a
-straight continuation (outward XY directions at 180 degrees). A merge requires exactly
-two arms at a shared OSM node, the same generated style instance and lane-count override,
-and endpoints within 1 cm in 3D. Different OSM ways have independent styles and remain
-separate, preserving their ability to receive different tag overrides. Reversed point
-orders are supported only when left/right lane
-definitions are identical, so their lane widths, profiles, markings and props are not swapped.
-Closed loops stay split for the native solver. The shared sample is kept once and all source
-OSM way IDs remain in the generated actor's tags. Branching nodes and 90-degree corners
-remain junctions. Incompatible spans retain the existing junction handling; no transition
-generator is added. The log reports the number of merged connections.
+Two-arm shared nodes are handled before actor creation. Compatible ways using the same
+selected source style and effective lane layout merge regardless of angle; the shared point
+remains a curve control and all source way IDs remain in the actor's tags. Merge comparisons
+use source assets rather than per-way copies. Reversing asymmetric lane layouts remains
+protected, and intentional split loops remain split. Scene ownership boundaries are retained.
+
+Nodes with three or more connecting road arms create junctions. Count road arms, not distinct
+OSM way IDs: a through-way plus one branch has three arms and remains a T-junction.
+Two-arm style or lane-count changes receive a separate native Road Transition segment.
+**Road Transition Length Cm** controls its desired combined length (default 6,000 cm);
+each approach contributes at most a quarter of its remaining length. Source and target styles
+are oriented to the transition direction and saved with the scene. The native lane-width
+taper handles reductions and expansions using an outer-edge-aligned union of lane stacks.
+It does not blend materials or lane profiles. No junction actor is added for a transition.
 
 **Clean Junction Approaches** defaults to enabled. The adapter first fits the roads and solves
 junctions without building their meshes. It uses the resulting cut-distance intervals along
@@ -194,13 +246,19 @@ Road Constructor then solves corner radii, cutbacks, overlapping junction cuts, 
 asphalt triangulation, sidewalk profiles and UVs. Its native approach-gate guard is 800 cm;
 very short terminal arms may be omitted from a junction by that guard.
 
-The output scene and source road controls are saved with the level. Connector roads and
-junction meshes are derived output and are regenerated on loading and entering play,
-without accessing the importer cache or making network requests. The project subclasses
-own this lifecycle because the vendor scene's full refresh discovers XY crossings.
+The output scene, source road controls, junction actors, connector roads and their
+surface meshes are saved with the level and its external actor packages. Imported
+junctions save durable copies of the plugin's transient gate/connector references;
+loading restores those references without regenerating roads or replacing meshes.
+Connector styles are exported with their owning connector actor. Both source and
+connector roads use the imported actor's load-safe lifecycle.
+
+Output created before junction persistence was added must be generated once with the
+new code and saved with **Save All**. Reopening the editor or entering play does not
+solve junctions, rebuild meshes, or automatically recreate missing legacy output.
 Imported scenes bypass the vendor scene's load/play callbacks, and imported roads
 bypass its load/undo callbacks that request automatic connectivity discovery. They keep
-the normal Actor lifecycle and queue only the shared-node rebuild. Geometric crossings
+the normal Actor lifecycle; property edits, moves, and undo do not queue regeneration. Geometric crossings
 without shared node keys therefore stay disconnected after reload, play, and undo.
 No installed plugin source or global plugin settings are modified.
 

@@ -7,8 +7,11 @@
 #include "Engine/Engine.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
+#include "Editor.h"
 #include "Misc/AutomationTest.h"
+#include "ScopedTransaction.h"
 #include "TimerManager.h"
+#include "UObject/UnrealType.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FImportedRoadLifecycleTest, "Landscapes.RoadConstructor.ImportedLifecycle", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 bool FImportedRoadLifecycleTest::RunTest(const FString& Parameters)
@@ -42,12 +45,13 @@ bool FImportedRoadLifecycleTest::RunTest(const FString& Parameters)
 		};
 		AddRoad(TEXT("west"), TEXT("shared"), FVector(-10000, 0, 100), FVector(0, 0, 100));
 		AddRoad(TEXT("shared"), TEXT("north"), FVector(0, 0, 100), FVector(0, 10000, 100));
+		AddRoad(TEXT("shared"), TEXT("east"), FVector(0, 0, 100), FVector(10000, 0, 100));
 		// This road crosses the first road geometrically, without a shared OSM node.
 		AddRoad(TEXT("cross-south"), TEXT("cross-north"), FVector(-5000, -10000, 100), FVector(-5000, 10000, 100));
 		TestTrue(TEXT("Shared-node network builds"), Scene->BuildImportedNetwork());
 		auto CheckConnectivity = [this, Scene]()
 		{
-			TestEqual(TEXT("Lifecycle preserves the three source roads"), Scene->Roads.Num(), 3);
+			TestEqual(TEXT("Lifecycle preserves the four source roads"), Scene->Roads.Num(), 4);
 			TestEqual(TEXT("Only the shared node creates a junction; XY crossing stays disconnected"), Scene->Junctions.Num(), 1);
 			TestFalse(TEXT("No plugin connectivity refresh is queued"), Scene->bPendingDeferredConnectivityRefresh);
 			TestFalse(TEXT("No plugin scene rebuild is queued"), Scene->bPendingDeferredSceneRebuild);
@@ -66,6 +70,17 @@ bool FImportedRoadLifecycleTest::RunTest(const FString& Parameters)
 			}
 		};
 		CheckConnectivity();
+		// Even missing output must not trigger implicit regeneration on load/play.
+		UStaticMeshComponent* MeshComponent = CastChecked<UStaticMeshComponent>(Scene->Roads[0]->GetRootComponent());
+		UStaticMesh* SavedMesh = MeshComponent->GetStaticMesh();
+		AJunctionActor* SavedJunction = Scene->Junctions[0];
+		MeshComponent->SetStaticMesh(nullptr);
+		auto CheckNoLifecycleRebuild = [this, Scene, MeshComponent, SavedMesh, SavedJunction]()
+		{
+			TestNull(TEXT("Load/play leaves missing road output unchanged"), MeshComponent->GetStaticMesh());
+			TestTrue(TEXT("Load/play preserves existing junction actors"), Scene->Junctions.Num() == 1 && Scene->Junctions[0] == SavedJunction);
+			MeshComponent->SetStaticMesh(SavedMesh);
+		};
 		if (WorldType == EWorldType::Editor)
 		{
 			// Exercise the load callbacks against a complete, renderable network.
@@ -74,15 +89,16 @@ bool FImportedRoadLifecycleTest::RunTest(const FString& Parameters)
 			CheckConnectivity();
 			DrainDeferredWork();
 			CheckConnectivity();
-			for (ARoadActor* Road : Scene->Roads) Road->PostEditUndo();
-			Scene->PostEditUndo();
-			CheckConnectivity();
+			CheckNoLifecycleRebuild();
+
 		}
 		else
 		{
 			Scene->DispatchBeginPlay();
 			for (ARoadActor* Road : Scene->Roads) Road->DispatchBeginPlay();
 			TestTrue(TEXT("Normal actor BeginPlay is preserved"), Scene->HasActorBegunPlay());
+			DrainDeferredWork();
+			CheckNoLifecycleRebuild();
 		}
 		DrainDeferredWork();
 		CheckConnectivity();
@@ -90,6 +106,76 @@ bool FImportedRoadLifecycleTest::RunTest(const FString& Parameters)
 		World->DestroyWorld(false);
 		GEngine->DestroyWorldContext(World);
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FImportedRoadSceneUndoTest, "Landscapes.RoadConstructor.SceneScopedUndo", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FImportedRoadSceneUndoTest::RunTest(const FString& Parameters)
+{
+	if (!TestNotNull(TEXT("Editor transaction support"), GEditor)) return false;
+	URoadStyle* Style = LoadObject<URoadStyle>(nullptr, TEXT("/RoadConstructor/RoadStyles/RS_Street_2Lane.RS_Street_2Lane"));
+	if (!TestNotNull(TEXT("Installed street style"), Style)) return false;
+	const UWorld::InitializationValues Init = UWorld::InitializationValues().AllowAudioPlayback(false).CreateNavigation(false).CreateAISystem(false);
+	UWorld* World = UWorld::CreateWorld(EWorldType::Editor, false, NAME_None, nullptr, true, ERHIFeatureLevel::Num, &Init);
+	if (!TestNotNull(TEXT("Scene undo world"), World)) return false;
+	GEngine->CreateNewWorldContext(EWorldType::Editor).SetCurrentWorld(World);
+	TGuardValue<UWorldProxy, UWorld*> WorldGuard(GWorld, World);
+	auto MakeScene = [World, Style](double Y)
+	{
+		AOsmRoadScene* Scene = World->SpawnActor<AOsmRoadScene>();
+		const TArray<FVector> Ends = { FVector(-10000, Y, 100), FVector(10000, Y, 100), FVector(0, Y + 10000, 100) };
+		for (int32 Index = 0; Index < Ends.Num(); ++Index)
+		{
+			AOsmRoadActor* Road = World->SpawnActor<AOsmRoadActor>();
+			Road->AttachToActor(Scene, FAttachmentTransformRules::KeepWorldTransform);
+			Road->SetFlags(RF_Transactional);
+			Road->InitWithStyle(Style, 100);
+			Road->bHasGround = false;
+			Road->ImportedPositions = { FVector(0, Y, 100), Ends[Index] };
+			Road->StartNodeKey = TEXT("shared");
+			Road->EndNodeKey = FString::FromInt(Index);
+			Scene->Roads.Add(Road);
+		}
+		return Scene;
+	};
+	AOsmRoadScene* EditedScene = MakeScene(0);
+	AOsmRoadScene* OtherScene = MakeScene(50000);
+	if (TestTrue(TEXT("Edited scene builds"), EditedScene->BuildImportedNetwork()) &&
+		TestTrue(TEXT("Other scene builds"), OtherScene->BuildImportedNetwork()))
+	{
+		ARoadActor* Road = EditedScene->Roads[0];
+		UStaticMeshComponent* Mesh = CastChecked<UStaticMeshComponent>(Road->GetRootComponent());
+		UStaticMesh* OtherMesh = CastChecked<UStaticMeshComponent>(OtherScene->Roads[0]->GetRootComponent())->GetStaticMesh();
+		const auto OtherJunctions = OtherScene->Junctions;
+		const FVector2D OriginalPoint = Road->RoadPoints.Last().Pos;
+		{
+			FScopedTransaction Transaction(NSLOCTEXT("GeoSimTests", "SceneRoadUndo", "Edit imported road"));
+			Road->Modify();
+			Mesh->Modify();
+			Road->RoadPoints.Last().Pos.Y += 100;
+			Road->UpdateCurve();
+			Road->BuildMesh(EditedScene->GetJunctionSlots(Road));
+		}
+		TestTrue(TEXT("Real road edit can be undone"), GEditor->UndoTransaction());
+		{
+			TGuardValue<uint64> FrameGuard(GFrameCounter, GFrameCounter);
+			for (int32 Tick = 0; Tick < 5; ++Tick)
+			{
+				++GFrameCounter;
+				FTSTicker::GetCoreTicker().Tick(0.1f);
+				World->GetTimerManager().Tick(0.1f);
+			}
+		}
+		TestTrue(TEXT("Undo restores road authoring data"), Road->RoadPoints.Last().Pos.Equals(OriginalPoint));
+		TestTrue(TEXT("Undo restores a visible road mesh"), Mesh->GetStaticMesh() != nullptr);
+		TestTrue(TEXT("Undo preserves the other scene mesh"), CastChecked<UStaticMeshComponent>(OtherScene->Roads[0]->GetRootComponent())->GetStaticMesh() == OtherMesh);
+		TestTrue(TEXT("Undo preserves the other scene junctions"), OtherScene->Junctions == OtherJunctions);
+		TestFalse(TEXT("Undo queues no refresh on the other scene"), OtherScene->bPendingDeferredConnectivityRefresh);
+	}
+	EditedScene->Destroy();
+	OtherScene->Destroy();
+	World->DestroyWorld(false);
+	GEngine->DestroyWorldContext(World);
 	return true;
 }
 
@@ -239,6 +325,7 @@ bool FImportedRoadConstructorMeshTest::RunTest(const FString& Parameters)
 		ImportedRoad->ImportedPositions = { ImportedRoad->ImportedPositions[0], ImportedRoad->ImportedPositions.Last() };
 	}
 	TestTrue(TEXT("Two straight way ends can be rebuilt"), Scene->BuildImportedNetwork());
+	TestEqual(TEXT("Two arms do not create a junction actor"), Scene->Junctions.Num(), 0);
 	for (ARoadActor* Road : Scene->Roads)
 	{
 		const UStaticMeshComponent* Mesh = Cast<UStaticMeshComponent>(Road->GetRootComponent());

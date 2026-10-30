@@ -23,6 +23,7 @@ namespace OsmRoadImporterInternal
 		TMap<FString, FString> Tags;
 	};
 
+	bool ParseRoadXml(const FString& Text, TMap<int64, FSourceRoadNode>& Nodes, TArray<FSourceRoadWay>& Ways);
 	bool ParseRoadJson(const FString& Text, TMap<int64, FSourceRoadNode>& Nodes, TArray<FSourceRoadWay>& Ways);
 }
 

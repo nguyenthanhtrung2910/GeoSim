@@ -46,6 +46,7 @@ bool FRoadStylePersistenceTest::RunTest(const FString& Parameters)
 	bool bSaved = false;
 	FString RoadPath;
 	TWeakObjectPtr<URoadStyle> OriginalStyle;
+	TWeakObjectPtr<URoadStyle> OriginalTargetStyle;
 	if (TestNotNull(TEXT("Scene actor"), Scene) && TestNotNull(TEXT("Road actor"), Road))
 	{
 		Scene->SetPackageExternal(true, false, CreatePackage(*SceneName));
@@ -61,6 +62,15 @@ bool FRoadStylePersistenceTest::RunTest(const FString& Parameters)
 		Style->Rename(*StyleName, Scene);
 		Scene->ImportedWayStyles.Add(42, Style);
 		Road->LastAppliedRoadStyle = Style;
+		URoadStyle* TargetStyle = DuplicateObject<URoadStyle>(Style, Scene);
+		TargetStyle->Rename(TEXT("TransitionTargetStyle"), Scene);
+		TargetStyle->ClearFlags(RF_Standalone);
+		TargetStyle->SetFlags(RF_Public | RF_Transactional);
+		TargetStyle->LeftLanes[0].Width = 123;
+		Scene->ImportedTransitionStyles.Add(TargetStyle);
+		Road->bEnableRoadTransitionPrototype = true;
+		Road->RoadTransitionTargetStyle = TargetStyle;
+		OriginalTargetStyle = TargetStyle;
 		OriginalStyle = Style;
 		RoadPath = Road->GetPathName();
 		auto Save = [this](UPackage* Package, UObject* Asset, const FString& Extension)
@@ -78,6 +88,7 @@ bool FRoadStylePersistenceTest::RunTest(const FString& Parameters)
 	GEngine->DestroyWorldContext(World);
 	CollectGarbage(RF_NoFlags);
 	TestFalse(TEXT("Original style is gone before disk reload"), OriginalStyle.IsValid());
+	TestFalse(TEXT("Original transition target is gone before disk reload"), OriginalTargetStyle.IsValid());
 
 	if (bSaved)
 	{
@@ -95,6 +106,13 @@ bool FRoadStylePersistenceTest::RunTest(const FString& Parameters)
 				if (TestNotNull(TEXT("Style retains its scene owner"), ReloadedScene))
 				{
 					TestTrue(TEXT("Scene and road reload the same style"), ReloadedScene->ImportedWayStyles.FindRef(42) == Style);
+					TestTrue(TEXT("Native transition enable survives reload"), ReloadedRoad->bEnableRoadTransitionPrototype);
+					if (URoadStyle* Target = ReloadedRoad->RoadTransitionTargetStyle;
+						TestNotNull(TEXT("Native transition target survives external-package reload"), Target))
+					{
+						TestTrue(TEXT("Scene owns the reloaded transition target"), ReloadedScene->ImportedTransitionStyles.Contains(Target));
+						TestEqual(TEXT("Transition target lane widths survive reload"), Target->LeftLanes[0].Width, 123.0);
+					}
 					TestFalse(TEXT("Disk reload does not queue plugin geometric discovery"), ReloadedScene->bPendingDeferredPostLoadAutoConnectivityRefresh);
 					TestFalse(TEXT("Disk reload does not queue a plugin scene rebuild"), ReloadedScene->bPendingDeferredSceneRebuild);
 				}

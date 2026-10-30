@@ -1,17 +1,49 @@
 #include "OsmRoadScene.h"
 
 #include "Components/PrimitiveComponent.h"
-#include "Containers/Ticker.h"
 #include "Engine/World.h"
 #include "Templates/UnrealTemplate.h"
-#include "Algo/Reverse.h"
 
 #include "Components/StaticMeshComponent.h"
-#if WITH_EDITOR
-#include "RoadGenerationSignatures.h"
-#endif
+#include "Engine/StaticMesh.h"
+#include "Serialization/ArchiveReplaceObjectRef.h"
+#include "UObject/UObjectIterator.h"
+#include "UObject/UnrealType.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogImportedRoadConstructor, Log, All);
+
+void AOsmJunctionActor::CaptureImportedReferences()
+{
+	ImportedReferences.Reset(Gates.Num());
+	for (const FJunctionGate& Gate : Gates)
+	{
+		auto& [Road, Links] = ImportedReferences.AddDefaulted_GetRef();
+		Road = Gate.Road;
+		for (const FJunctionLink& Link : Gate.Links) Links.Add(Link.Road);
+	}
+}
+
+void AOsmJunctionActor::PostLoad()
+{
+	// The native callback can discard serialized meshes and queue a full refresh.
+	// ReSharper disable once CppReferenceToOverriddenVirtualFunction
+	AActor::PostLoad();
+	RoadConstructorGeneratedMeshComponent = Cast<UPrimitiveComponent>(GetRootComponent());
+	for (int32 GateIndex = 0; GateIndex < FMath::Min(Gates.Num(), ImportedReferences.Num()); ++GateIndex)
+	{
+		FJunctionGate& Gate = Gates[GateIndex];
+		const auto& [Road, Links] = ImportedReferences[GateIndex];
+		Gate.Road = Road;
+		for (int32 LinkIndex = 0; LinkIndex < FMath::Min(Gate.Links.Num(), Links.Num()); ++LinkIndex)
+			Gate.Links[LinkIndex].Road = Links[LinkIndex];
+	}
+}
+
+void AOsmJunctionActor::BeginPlay()
+{
+	// ReSharper disable once CppReferenceToOverriddenVirtualFunction
+	AActor::BeginPlay();
+}
 
 bool AOsmRoadActor::RestoreImportedCurve()
 {
@@ -81,44 +113,11 @@ int32 AOsmRoadActor::CleanSolvedJunctionPoints(const TArray<FJunctionSlot>& Slot
 
 void AOsmRoadActor::PostLoad()
 {
-	// These are freshly imported roads, not vendor-authored assets requiring migrations.
-	// The vendor callback queues a full XY-discovery rebuild; our scene owns restoration.
+	// Loading must preserve saved output without queuing the vendor's full rebuild.
 	// ReSharper disable once CppReferenceToOverriddenVirtualFunction
 	AActor::PostLoad();
 	RoadConstructorGeneratedMeshComponent = Cast<UPrimitiveComponent>(GetRootComponent());
-	if (AOsmRoadScene* Scene = Cast<AOsmRoadScene>(GetScene())) Scene->QueueImportedRebuild();
 }
-
-#if WITH_EDITOR
-void AOsmRoadActor::PostEditMove(const bool bFinished)
-{
-	ARoadActor::PostEditMove(bFinished);
-	// Road Constructor stores its geometry in scene coordinates. Reimport controls
-	// rather than moving only the mesh component away from the junction solver.
-	if (bFinished)
-	{
-		SetActorTransform(FTransform::Identity);
-		if (AOsmRoadScene* Scene = Cast<AOsmRoadScene>(GetScene())) Scene->QueueImportedRebuild();
-	}
-}
-
-void AOsmRoadActor::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
-{
-	ARoadActor::PostEditChangeProperty(PropertyChangedEvent);
-	if (AOsmRoadScene* Scene = Cast<AOsmRoadScene>(GetScene())) Scene->QueueImportedRebuild();
-}
-
-void AOsmRoadActor::PostEditUndo()
-{
-	// The plugin queues geometric connectivity discovery for roads touching junctions.
-	// ReSharper disable once CppReferenceToOverriddenVirtualFunction
-	AActor::PostEditUndo();
-	if (AOsmRoadScene* Scene = Cast<AOsmRoadScene>(GetScene()))
-	{
-		Scene->QueueImportedRebuild();
-	}
-}
-#endif
 
 void AOsmRoadScene::ClearImportedJunctions()
 {
@@ -129,6 +128,7 @@ void AOsmRoadScene::ClearImportedJunctions()
 		if (IsValid(Junction)) Junction->Destroy(); // Also destroys its internal connector roads.
 	}
 	JunctionLinkRoads.Reset();
+	ImportedConnectorRoads.Reset();
 }
 
 bool AOsmRoadScene::SolveImportedJunctions()
@@ -156,20 +156,21 @@ bool AOsmRoadScene::SolveImportedJunctions()
 		if (!ImportedRoad->EndNodeKey.IsEmpty()) Endpoints.FindOrAdd(ImportedRoad->EndNodeKey).Add({ Road, Road->Length() });
 	}
 
-	// One actor per known OSM node, including degree-two way seams. No XY crossing discovery.
+	// Junctions require at least three connecting road arms. Two-arm seams are
+	// merged during import when compatible; no XY crossing discovery is performed.
 	TArray<FString> Keys;
 	Endpoints.GetKeys(Keys);
 	Keys.Sort();
 	for (const FString& Key : Keys)
 	{
 		const TArray<FEndpoint>& Arms = Endpoints[Key];
-		if (Arms.Num() < 2) continue;
+		if (Arms.Num() < 3) continue;
 		FActorSpawnParameters Params;
 		Params.Owner = this;
 		Params.OverrideLevel = GetLevel();
-		Params.ObjectFlags = RF_Transient;
+		Params.ObjectFlags = RF_Public | RF_Transactional;
 		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-		AJunctionActor* Junction = GetWorld()->SpawnActor<AJunctionActor>(FVector::ZeroVector, FRotator::ZeroRotator, Params);
+		AJunctionActor* Junction = GetWorld()->SpawnActor<AOsmJunctionActor>(FVector::ZeroVector, FRotator::ZeroRotator, Params);
 		if (!Junction) return false;
 		Junction->AttachToActor(this, FAttachmentTransformRules::KeepWorldTransform);
 		Junctions.Add(Junction);
@@ -211,7 +212,7 @@ bool AOsmRoadScene::SolveImportedJunctions()
 
 	for (int32 Index = Junctions.Num() - 1; Index >= 0; --Index)
 	{
-		if (Junctions[Index]->Gates.Num() < 2)
+		if (Junctions[Index]->Gates.Num() < 3)
 		{
 			Junctions[Index]->Destroy();
 			Junctions.RemoveAt(Index);
@@ -245,11 +246,8 @@ int32 AOsmRoadScene::RemoveCornersWithoutJunctionSurface(AJunctionActor* Junctio
 	return Removed;
 }
 
-bool AOsmRoadScene::BuildImportedNetwork()
+bool AOsmRoadScene::PrepareRoadCurves()
 {
-	if (bBuildingImportedNetwork || IsActorBeingDestroyed() || !GetWorld()) return false;
-	TGuardValue<bool> BuildingGuard(bBuildingImportedNetwork, true);
-	ClearImportedJunctions();
 	for (ARoadActor* Road : Roads)
 	{
 		if (AOsmRoadActor* ImportedRoad = Cast<AOsmRoadActor>(Road); !IsValid(ImportedRoad) || !ImportedRoad->
@@ -259,6 +257,14 @@ bool AOsmRoadScene::BuildImportedNetwork()
 			return false;
 		}
 	}
+	return !Roads.IsEmpty();
+}
+
+bool AOsmRoadScene::SolveJunctions(const bool bRestoreCurves)
+{
+	// Approach cleanup depends on solved cuts. Re-solve from the untrimmed controls,
+	// including when only junction settings changed since the last generation.
+	if (bRestoreCurves && !PrepareRoadCurves()) return false;
 	if (!SolveImportedJunctions()) return false;
 	if (bCleanJunctionApproaches)
 	{
@@ -282,12 +288,168 @@ bool AOsmRoadScene::BuildImportedNetwork()
 			UE_LOG(LogImportedRoadConstructor, Display, TEXT("Removed %d ordinary controls inside solved junction cut ranges; solved junctions again before meshing. Imported source positions are unchanged."), RemovedPoints);
 		}
 	}
+	return true;
+}
+
+bool AOsmRoadScene::PersistImportedConnectors()
+{
+	// Native connector construction always spawns transient ARoadActors. Convert
+	// those results to our load-safe actor type before publishing the generated scene.
+	TMap<UObject*, UObject*> Replacements;
+	for (ARoadActor* Road : JunctionLinkRoads)
+	{
+		if (Road->IsA<AOsmRoadActor>()) continue;
+		FActorSpawnParameters Params;
+		Params.Owner = this;
+		Params.OverrideLevel = GetLevel();
+		Params.ObjectFlags = RF_Public | RF_Transactional;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		AOsmRoadActor* Saved = GetWorld()->SpawnActor<AOsmRoadActor>(AOsmRoadActor::StaticClass(), Road->GetActorTransform(), Params);
+		if (!Saved) return false;
+		Replacements.Add(Road, Saved);
+	}
+	for (const auto& Pair : Replacements)
+	{
+		ARoadActor* Original = CastChecked<ARoadActor>(Pair.Key);
+		AOsmRoadActor* Saved = CastChecked<AOsmRoadActor>(Pair.Value);
+		AActor* Parent = Original->GetAttachParentActor();
+		const FTransform Transform = Original->GetActorTransform();
+		Saved->UnregisterAllComponents();
+		// Copy road settings, never the actor/component hierarchy or actor GUID.
+		// Surfaces and props are generated on the new actor later in this stage.
+		for (TFieldIterator<FProperty> Property(ARoadActor::StaticClass(), EFieldIteratorFlags::ExcludeSuper); Property; ++Property)
+		{
+			if (Property->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated)) continue;
+			if (const FObjectPropertyBase* Object = CastField<FObjectPropertyBase>(*Property);
+				Object && Object->PropertyClass->IsChildOf(UActorComponent::StaticClass())) continue;
+			Property->CopyCompleteValue_InContainer(Saved, Original);
+		}
+		Saved->Tags = Original->Tags;
+		// Duplicate the ordinary UObject model graph explicitly so no lane or
+		// boundary remains owned by a temporary actor that will be destroyed.
+		TArray<UObject*> Models;
+		for (URoadBoundary* Boundary : Original->Boundaries) Models.AddUnique(Boundary);
+		for (URoadConstructorLane* Lane : Original->Lanes) Models.AddUnique(Lane);
+		for (URoadMarking* Marking : Original->Markings) Models.AddUnique(Marking);
+		ForEachObjectWithOuter(Original, [&](UObject* Object)
+		{
+			if (Object->GetClass()->GetOutermost()->GetName() == TEXT("/Script/RoadConstructor") &&
+				!Object->IsA<UStaticMesh>() && !Object->IsA<UActorComponent>()) Models.AddUnique(Object);
+		}, EGetObjectsFlags::IncludeNestedObjects);
+		TMap<UObject*, UObject*> ModelCopies = Replacements;
+		for (UObject* Model : Models)
+		{
+			if (!IsValid(Model) || ModelCopies.Contains(Model)) continue;
+			const FName Name = MakeUniqueObjectName(Saved, Model->GetClass(), FName(*(TEXT("Imported_") + Model->GetName())));
+			UObject* Result = NewObject<UObject>(Saved, Model->GetClass(), Name, RF_Transactional);
+			if (!Result) return false;
+			ModelCopies.Add(Model, Result);
+		}
+		for (UObject* Model : Models)
+			for (TFieldIterator<FProperty> Property(Model->GetClass()); Property; ++Property)
+				Property->CopyCompleteValue_InContainer(ModelCopies.FindChecked(Model), Model);
+		Saved->BaseCurve = CastChecked<URoadBoundary>(ModelCopies.FindChecked(Original->BaseCurve));
+		Saved->Boundaries.Reset();
+		for (URoadBoundary* Boundary : Original->Boundaries) Saved->Boundaries.Add(CastChecked<URoadBoundary>(ModelCopies.FindChecked(Boundary)));
+		Saved->Lanes.Reset();
+		for (URoadConstructorLane* Lane : Original->Lanes) Saved->Lanes.Add(CastChecked<URoadConstructorLane>(ModelCopies.FindChecked(Lane)));
+		Saved->Markings.Reset();
+		for (URoadMarking* Marking : Original->Markings) Saved->Markings.Add(CastChecked<URoadMarking>(ModelCopies.FindChecked(Marking)));
+		for (UObject* Model : Models)
+			if (UObject* const* Result = ModelCopies.Find(Model))
+				FArchiveReplaceObjectRef<UObject> Reconnect(*Result, ModelCopies,
+					EArchiveReplaceObjectFlags::IgnoreOuterRef | EArchiveReplaceObjectFlags::IgnoreArchetypeRef);
+		FArchiveReplaceObjectRef<UObject> ReconnectActor(Saved, ModelCopies,
+			EArchiveReplaceObjectFlags::IgnoreOuterRef | EArchiveReplaceObjectFlags::IgnoreArchetypeRef);
+		Saved->ClearFlags(RF_Transient);
+		Saved->SetFlags(RF_Public | RF_Transactional);
+		Saved->SetOwner(this);
+		if (Saved->GetRootComponent()) Saved->GetRootComponent()->SetupAttachment(nullptr);
+		Saved->AttachToActor(Parent, FAttachmentTransformRules::KeepWorldTransform);
+		Saved->SetActorTransform(Transform);
+		if (!IsValid(Original->LastAppliedRoadStyle)) return false;
+		Saved->ImportedConnectorStyle = DuplicateObject<URoadStyle>(Original->LastAppliedRoadStyle, Saved);
+		Saved->ImportedConnectorStyle->ClearFlags(RF_Transient | RF_Standalone);
+		Saved->ImportedConnectorStyle->SetFlags(RF_Public | RF_Transactional);
+		Saved->LastAppliedRoadStyle = Saved->ImportedConnectorStyle;
+		Saved->SetGeneratedJunctionInternalRoad(true);
+		// Preserve the solved model verbatim. Native connector boundaries can collapse
+		// to one point; persistence must neither reject nor recompute that geometry.
+		for (int32 Index = 0; Index < Saved->Boundaries.Num(); ++Index)
+		{
+			const URoadBoundary* Boundary = Saved->Boundaries[Index];
+			const URoadBoundary* Source = Original->Boundaries[Index];
+			if (!Boundary || !Boundary->IsIn(Saved) || !Source ||
+				!FPolyline::StaticStruct()->CompareScriptStruct(&Boundary->Curve, &Source->Curve, 0))
+			{
+				UE_LOG(LogImportedRoadConstructor, Error, TEXT("Connector conversion failed: road=%s segments=%d boundary=%s owner=%s points=%d."),
+					*Saved->GetName(), Saved->RoadSegments.Num(), *GetNameSafe(Boundary), *GetNameSafe(Boundary ? Boundary->GetOuter() : nullptr), Boundary ? Boundary->Curve.Points.Num() : 0);
+				return false;
+			}
+		}
+		Saved->ReregisterAllComponents();
+	}
+	auto replace = [&](ARoadActor*& Road)
+	{
+		if (UObject* const* Saved = Replacements.Find(Road)) Road = CastChecked<ARoadActor>(*Saved);
+	};
+	for (AJunctionActor* Junction : Junctions)
+		for (FJunctionGate& Gate : Junction->Gates)
+			for (FJunctionLink& Link : Gate.Links)
+			{
+				replace(Link.Road);
+				replace(Link.InputRoad);
+				replace(Link.OutputRoad);
+			}
+	for (ARoadActor*& Road : JunctionLinkRoads) replace(Road);
+	for (const auto& Pair : Replacements) CastChecked<ARoadActor>(Pair.Key)->Destroy();
+	ImportedConnectorRoads.Reset();
+	for (ARoadActor* Road : JunctionLinkRoads) ImportedConnectorRoads.Add(Road);
+	for (AJunctionActor* Junction : Junctions)
+		if (AOsmJunctionActor* Imported = Cast<AOsmJunctionActor>(Junction)) Imported->CaptureImportedReferences();
+	return true;
+}
+
+void AOsmRoadScene::UpdateGeneratedActorFolders()
+{
+#if WITH_EDITOR
+	TSet<AActor*> Actors;
+	TArray<AActor*> Pending = { this };
+	for (ARoadActor* Road : Roads) Pending.Add(Road);
+	for (AJunctionActor* Junction : Junctions) Pending.Add(Junction);
+	for (ARoadActor* Link : JunctionLinkRoads) Pending.Add(Link);
+	while (!Pending.IsEmpty())
+	{
+		AActor* Actor = Pending.Pop(EAllowShrinking::No);
+		if (!IsValid(Actor) || Actor->IsActorBeingDestroyed() || Actors.Contains(Actor)) continue;
+		Actors.Add(Actor);
+		// Ownership also covers props whose native attachment was unsuccessful.
+		for (AActor* Child : Actor->Children) Pending.Add(Child);
+		TArray<AActor*> Attached;
+		Actor->GetAttachedActors(Attached);
+		Pending.Append(Attached);
+	}
+	const FName Folder = GetFolderPath();
+	for (AActor* Actor : Actors)
+		if (Actor != this && Actor->GetFolderPath() != Folder)
+		{
+			Actor->Modify();
+			Actor->SetFolderPath(Folder);
+		}
+#endif
+}
+
+bool AOsmRoadScene::BuildSurfaceMeshes()
+{
 	for (AJunctionActor* Junction : Junctions)
 	{
 		Junction->Build();
 		RemoveCornersWithoutJunctionSurface(Junction);
 	}
-	// Obtain slots from the final junctions so both surface types use the same cuts.
+	ReconcileTrackedJunctionLinkRoads();
+	if (!PersistImportedConnectors()) return false;
+	// Native mesh construction includes boundary props from the applied style.
+	// Obtain slots from the final junctions so meshes and props use the same cuts.
 	const TMap<ARoadActor*, TArray<FJunctionSlot>> SlotsByRoad = GetAllJunctionSlots();
 	for (ARoadActor* Road : Roads)
 	{
@@ -295,39 +457,29 @@ bool AOsmRoadScene::BuildImportedNetwork()
 		Road->BuildMesh(Slots ? *Slots : TArray<FJunctionSlot>());
 	}
 	ReconcileTrackedJunctionLinkRoads();
-#if WITH_EDITOR
-	LastBuiltOutputSignature = RoadGenerationSignatures::RoadOutput(this);
-#endif
-	UE_LOG(LogImportedRoadConstructor, Display, TEXT("Built %d Road Constructor roads and %d OSM junctions."), Roads.Num(), Junctions.Num());
-	return !Roads.IsEmpty();
+	// Rebuild persisted connectors with their native style-derived boundary props.
+	for (ARoadActor* Link : JunctionLinkRoads) Link->BuildMesh({});
+	UpdateGeneratedActorFolders();
+	return true;
 }
 
-void AOsmRoadScene::QueueImportedRebuild()
+bool AOsmRoadScene::BuildImportedNetwork()
 {
-	if (bPreparingImportedRoads || bBuildingImportedNetwork || bImportedRebuildQueued ||
-		HasAnyFlags(RF_ClassDefaultObject | RF_ArchetypeObject) || IsActorBeingDestroyed()) return;
-	bImportedRebuildQueued = true;
-	FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateWeakLambda(this, [this](float)
-	{
-		bImportedRebuildQueued = false;
-		if (!GetWorld() || IsActorBeingDestroyed()) return false;
-#if WITH_EDITOR
-		// Labels and editor bookkeeping also emit property-change events. Reuse
-		// unchanged output instead of replacing the generator cache's mesh/junctions.
-		if (!LastBuiltOutputSignature.IsEmpty() && LastBuiltOutputSignature == RoadGenerationSignatures::RoadOutput(this)) return false;
-#endif
-		BuildImportedNetwork();
-		return false;
-	}));
+	if (bBuildingImportedNetwork || IsActorBeingDestroyed() || !GetWorld()) return false;
+	TGuardValue<bool> BuildingGuard(bBuildingImportedNetwork, true);
+	if (!SolveJunctions() || !BuildSurfaceMeshes()) return false;
+	UE_LOG(LogImportedRoadConstructor, Display, TEXT("Built %d Road Constructor roads and %d OSM junctions."), Roads.Num(), Junctions.Num());
+	return !Roads.IsEmpty();
 }
 
 void AOsmRoadScene::PostLoad()
 {
 	// ARoadScene::PostLoad/BeginPlay schedule geometry-based connectivity discovery.
-	// Restore our serialized control points and OSM connectivity instead.
+	// Keep saved output unchanged; generation is an explicit editor action.
 	// ReSharper disable once CppReferenceToOverriddenVirtualFunction
 	AActor::PostLoad();
-	QueueImportedRebuild();
+	JunctionLinkRoads.Reset();
+	for (ARoadActor* Road : ImportedConnectorRoads) if (IsValid(Road)) JunctionLinkRoads.AddUnique(Road);
 }
 
 void AOsmRoadScene::BeginPlay()
@@ -335,16 +487,7 @@ void AOsmRoadScene::BeginPlay()
 	// Keep normal actor/component BeginPlay, without the plugin's next-tick Refresh All.
 	// ReSharper disable once CppReferenceToOverriddenVirtualFunction
 	AActor::BeginPlay();
-	QueueImportedRebuild();
 }
-
-#if WITH_EDITOR
-void AOsmRoadScene::PostEditUndo()
-{
-	ARoadScene::PostEditUndo();
-	QueueImportedRebuild();
-}
-#endif
 
 void AOsmRoadScene::Destroyed()
 {

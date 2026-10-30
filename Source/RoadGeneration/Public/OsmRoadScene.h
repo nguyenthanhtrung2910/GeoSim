@@ -5,7 +5,31 @@
 #include "RoadScene.h"
 #include "OsmRoadScene.generated.h"
 
-/** Source roads owned by our importer; the scene restores their generated meshes after loading. */
+/** Durable counterparts of the plugin's transient gate and connector references. */
+USTRUCT()
+struct FImportedJunctionReferences
+{
+	GENERATED_BODY()
+	UPROPERTY()
+	TObjectPtr<ARoadActor> Road;
+	UPROPERTY()
+	TArray<TObjectPtr<ARoadActor>> Links;
+};
+
+/** Saved imported junction; loading restores references without discovering or rebuilding roads. */
+UCLASS(NotPlaceable)
+class ROADGENERATION_API AOsmJunctionActor : public AJunctionActor
+{
+	GENERATED_BODY()
+public:
+	UPROPERTY()
+	TArray<FImportedJunctionReferences> ImportedReferences;
+	void CaptureImportedReferences();
+	virtual void PostLoad() override;
+	virtual void BeginPlay() override;
+};
+
+/** Source roads owned by our importer; loading preserves output without regeneration. */
 UCLASS(NotPlaceable)
 class ROADGENERATION_API AOsmRoadActor : public ARoadActor
 {
@@ -23,15 +47,14 @@ public:
 	UPROPERTY()
 	double ImportedCurveRadius = 5000000.0;
 
+	/** Connector styles must be exported with their actor, rather than /Engine/Transient. */
+	UPROPERTY(Instanced)
+	TObjectPtr<URoadStyle> ImportedConnectorStyle;
+
 	bool RestoreImportedCurve();
 	/** Removes ordinary controls in solved junction cut ranges from a temporary point list. */
 	int32 CleanSolvedJunctionPoints(const TArray<FJunctionSlot>& Slots);
 	virtual void PostLoad() override;
-#if WITH_EDITOR
-	virtual void PostEditUndo() override;
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
-	virtual void PostEditMove(bool bFinished) override;
-#endif
 private:
 	bool BuildCurveFromPositions(const TArray<FVector>& Positions);
 };
@@ -47,6 +70,20 @@ public:
 	/** Export per-way styles with this scene, even when referencing roads are external actors. */
 	UPROPERTY(Instanced)
 	TMap<int64, TObjectPtr<URoadStyle>> ImportedWayStyles;
+
+	/** Durable source and target styles for native two-arm road transition segments. */
+	UPROPERTY(Instanced)
+	TArray<TObjectPtr<URoadStyle>> ImportedTransitionStyles;
+
+	/** The native scene's JunctionLinkRoads array is transient. */
+	UPROPERTY()
+	TArray<TObjectPtr<ARoadActor>> ImportedConnectorRoads;
+
+	bool PrepareRoadCurves();
+	bool SolveJunctions(bool bRestoreCurves = true);
+	bool BuildSurfaceMeshes();
+	/** Put all generated roads, junctions, connectors, and attached prop actors in this scene's Outliner folder. */
+	void UpdateGeneratedActorFolders();
 
 	/** Mesh elevation offset used when generating this scene's imported positions. */
 	UPROPERTY()
@@ -67,22 +104,16 @@ public:
 
 	bool BuildImportedNetwork();
 	int32 RemoveCornersWithoutJunctionSurface(AJunctionActor* Junction) const;
-	void QueueImportedRebuild();
 	virtual void PostLoad() override;
 	virtual void BeginPlay() override;
 	virtual void Destroyed() override;
-#if WITH_EDITOR
-	virtual void PostEditUndo() override;
-#endif
 
 private:
-	friend class ARoadGenerator;
-	bool bPreparingImportedRoads = false;
-	bool bImportedRebuildQueued = false;
+	friend class FRoadConnectorConversionTest;
 	bool bBuildingImportedNetwork = false;
-#if WITH_EDITOR
-	FString LastBuiltOutputSignature;
-#endif
 	void ClearImportedJunctions();
+	
+	
 	bool SolveImportedJunctions();
+	bool PersistImportedConnectors();
 };
