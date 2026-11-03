@@ -6,7 +6,7 @@
 #include "HAL/ThreadSafeCounter.h"
 #include "LCCommon/ActorSelection.h"
 #include "ImportedRoadData.h"
-#include "OSMRoadImporter.generated.h"
+#include "OsmRoadImporter.generated.h"
 
 namespace OsmRoadImporterInternal
 {

@@ -156,15 +156,15 @@ bool AOsmRoadScene::SolveImportedJunctions()
 		if (!ImportedRoad->EndNodeKey.IsEmpty()) Endpoints.FindOrAdd(ImportedRoad->EndNodeKey).Add({ Road, Road->Length() });
 	}
 
-	// Junctions require at least three connecting road arms. Two-arm seams are
-	// merged during import when compatible; no XY crossing discovery is performed.
+	// Branches and explicitly classified sharp two-arm bends use native junctions.
+	// Other two-arm seams merge or transition during import; no XY discovery occurs.
 	TArray<FString> Keys;
 	Endpoints.GetKeys(Keys);
 	Keys.Sort();
 	for (const FString& Key : Keys)
 	{
 		const TArray<FEndpoint>& Arms = Endpoints[Key];
-		if (Arms.Num() < 3) continue;
+		if (Arms.Num() < 3 && !(Arms.Num() == 2 && ImportedTwoArmJunctionKeys.Contains(Key))) continue;
 		FActorSpawnParameters Params;
 		Params.Owner = this;
 		Params.OverrideLevel = GetLevel();
@@ -212,7 +212,7 @@ bool AOsmRoadScene::SolveImportedJunctions()
 
 	for (int32 Index = Junctions.Num() - 1; Index >= 0; --Index)
 	{
-		if (Junctions[Index]->Gates.Num() < 3)
+		if (Junctions[Index]->Gates.Num() < 2)
 		{
 			Junctions[Index]->Destroy();
 			Junctions.RemoveAt(Index);

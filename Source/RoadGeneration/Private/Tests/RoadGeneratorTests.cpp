@@ -1,4 +1,5 @@
 #include "RoadGenerator.h"
+#include "RoadGeneratorInternal.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 #include "ImportedRoadData.h"
@@ -192,7 +193,9 @@ bool FRoadConstructorImportTopologyTest::RunTest(const FString& Parameters)
 	}
 	StraightB.Points.Last().WorldLocation = FVector(5000, 5000, 0);
 	Spans = PrepareSpans({ StraightA, StraightB }, {}, true, 0, 0);
-	TestEqual(TEXT("Two-arm bends merge without creating a junction"), MergeSharedNodeSpans(Spans, SameStyle), 1);
+	TestEqual(TEXT("Sharp two-arm bends do not merge"), MergeSharedNodeSpans(Spans, SameStyle), 0);
+	TestEqual(TEXT("Sharp bend is classified for a junction"), FindSharpSharedNodes(Spans, 45.0).Num(), 1);
+	TestEqual(TEXT("The threshold can allow a right-angle merge"), MergeSharedNodeSpans(Spans, SameStyle, 90.0), 1);
 	StraightB.Points.Last().WorldLocation = FVector(10000, 400, 0);
 	Spans = PrepareSpans({ StraightA, StraightB }, {}, true, 0, 0);
 	TestEqual(TEXT("A shallow bend also merges"), MergeSharedNodeSpans(Spans, SameStyle), 1);
@@ -241,10 +244,82 @@ bool FRoadConstructorImportTopologyTest::RunTest(const FString& Parameters)
 	Footway.Tags.Add(TEXT("area"), TEXT("yes"));
 	TestEqual(TEXT("Tunnel, layer and area tags do not exclude ways"), PrepareSpans({ Footway }, { TEXT("custom_highway") }, true, 0, 0).Num(), 1);
 	TestEqual(TEXT("Other tags cannot bypass the highway filter"), PrepareSpans({ Footway }, { TEXT("residential") }, true, 0, 0).Num(), 0);
+	TArray<FExcludedRoadTag> Exclusions = { { TEXT("footway"), TEXT("sidewalk") }, { TEXT("access"), TEXT("private") } };
+	Footway.Tags.Add(TEXT("footway"), TEXT("sidewalk"));
+	TestEqual(TEXT("Matching tag excludes a highway-selected way"), PrepareSpans({ Footway }, {}, true, 0, 0, Exclusions).Num(), 0);
+	Footway.Tags.Add(TEXT("footway"), TEXT("crossing"));
+	TestEqual(TEXT("Other values of the same tag remain eligible"), PrepareSpans({ Footway }, {}, true, 0, 0, Exclusions).Num(), 1);
+	Exclusions.Add({ TEXT("footway"), TEXT("crossing") });
+	TestEqual(TEXT("Repeated tags exclude a second value"), PrepareSpans({ Footway }, {}, true, 0, 0, Exclusions).Num(), 0);
+	Exclusions.RemoveAt(0);
+	Footway.Tags.Add(TEXT("footway"), TEXT("sidewalk"));
+	TestEqual(TEXT("Removing one value keeps the other exclusion independent"), PrepareSpans({ Footway }, {}, true, 0, 0, Exclusions).Num(), 1);
+	Footway.Tags.Add(TEXT("access"), TEXT("private"));
+	TestEqual(TEXT("Any matching exclusion is sufficient"), PrepareSpans({ Footway }, {}, true, 0, 0, Exclusions).Num(), 0);
+	Footway.Tags.Remove(TEXT("access"));
+	Footway.Tags.Remove(TEXT("footway"));
+	TestEqual(TEXT("A missing tag does not match an exclusion"), PrepareSpans({ Footway }, {}, true, 0, 0, Exclusions).Num(), 1);
 	return true;
 }
 
 #if WITH_EDITOR
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRoadGeneratorTagExclusionTest,
+	"Landscapes.RoadConstructor.TagExclusions", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FRoadGeneratorTagExclusionTest::RunTest(const FString& Parameters)
+{
+	const UWorld::InitializationValues Init = UWorld::InitializationValues().AllowAudioPlayback(false).CreateNavigation(false).CreateAISystem(false);
+	UWorld* World = UWorld::CreateWorld(EWorldType::Editor, false, NAME_None, nullptr, true, ERHIFeatureLevel::Num, &Init);
+	if (!TestNotNull(TEXT("Tag exclusion world"), World)) return false;
+	GEngine->CreateNewWorldContext(EWorldType::Editor).SetCurrentWorld(World);
+	ARoadGenerator* Generator = World->SpawnActor<ARoadGenerator>();
+	Generator->HighwayFilter.Reset();
+	Generator->ExcludedRoadTagRules.Add({ TEXT("footway"), TEXT("sidewalk") });
+	FImportedRoadWay Main, Sidewalk;
+	Main.WayId = 1;
+	Main.Tags.Add(TEXT("highway"), TEXT("residential"));
+	Main.Points = { { 1, FVector(-10000, 0, 100), true }, { 2, FVector(0, 0, 100), true }, { 3, FVector(10000, 0, 100), true } };
+	Sidewalk.WayId = 2;
+	Sidewalk.Tags = { { TEXT("highway"), TEXT("footway") }, { TEXT("footway"), TEXT("sidewalk") } };
+	Sidewalk.Points = { { 2, FVector(0, 0, 100), true }, { 4, FVector(0, 10000, 100), true } };
+	TArray<FImportedRoadWay> Ways = { Main, Sidewalk };
+	if (TestTrue(TEXT("Excluded sidewalk generation succeeds"), Generator->BuildRoads(Ways, NAME_None)))
+	{
+		AOsmRoadScene* Scene = Generator->GeneratedScene.Get();
+		TestEqual(TEXT("Excluded ways do not split retained roads"), Scene->Roads.Num(), 1);
+		TestEqual(TEXT("Excluded ways do not contribute junction arms"), Scene->Junctions.Num(), 0);
+		Ways[1].Points.Last().WorldLocation.Y += 1000;
+		TestTrue(TEXT("Excluded input edits succeed"), Generator->BuildRoads(Ways, NAME_None));
+		TestTrue(TEXT("Excluded input edits preserve generated output"), Generator->GeneratedScene.Get() == Scene);
+		Generator->ExcludedRoadTagRules.Reset();
+		if (TestTrue(TEXT("Removing exclusion regenerates output"), Generator->BuildRoads(Ways, NAME_None)))
+		{
+			TestEqual(TEXT("Restored sidewalk creates a junction"), Generator->GeneratedScene.Get()->Junctions.Num(), 1);
+			TestEqual(TEXT("Restored sidewalk splits the main road"), Generator->GeneratedScene.Get()->Roads.Num(), 3);
+		}
+		Generator->ExcludedRoadTagRules.Add({ TEXT("footway"), TEXT("sidewalk") });
+		TestTrue(TEXT("Restoring exclusion regenerates output"), Generator->BuildRoads(Ways, NAME_None));
+		Ways[1].Tags.Add(TEXT("footway"), TEXT("crossing"));
+		if (TestTrue(TEXT("An edited tag can make a way eligible again"), Generator->BuildRoads(Ways, NAME_None)))
+			TestEqual(TEXT("Tag changes participate in selection and change detection"), Generator->GeneratedScene.Get()->Junctions.Num(), 1);
+		Generator->ExcludedRoadTagRules.Add({ TEXT("footway"), TEXT("crossing") });
+		if (TestTrue(TEXT("Adding a second value excludes the crossing"), Generator->BuildRoads(Ways, NAME_None)))
+		{
+			TestEqual(TEXT("Second value removes the crossing junction"), Generator->GeneratedScene.Get()->Junctions.Num(), 0);
+			AOsmRoadScene* WithoutCrossing = Generator->GeneratedScene.Get();
+			Swap(Generator->ExcludedRoadTagRules[0], Generator->ExcludedRoadTagRules[1]);
+			TestTrue(TEXT("Reordered rules succeed"), Generator->BuildRoads(Ways, NAME_None));
+			TestTrue(TEXT("Rule order does not regenerate output"), Generator->GeneratedScene.Get() == WithoutCrossing);
+			Ways[1].Tags.Add(TEXT("footway"), TEXT("sidewalk"));
+			TestTrue(TEXT("First value stays excluded with repeated tags"), Generator->BuildRoads(Ways, NAME_None));
+			TestTrue(TEXT("Switching between excluded values preserves output"), Generator->GeneratedScene.Get() == WithoutCrossing);
+		}
+	}
+	Generator->ClearRoads();
+	World->DestroyWorld(false);
+	GEngine->DestroyWorldContext(World);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRoadGeneratorChangeDetectionTest,
 	"Landscapes.RoadConstructor.ChangeDetection",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -497,12 +572,21 @@ bool FRoadGeneratorSharedNodeTest::RunTest(const FString& Parameters)
 		if (TestTrue(TEXT("Shared-node connection builds"), Generator->BuildRoads(Ways, NAME_None)))
 		{
 			AOsmRoadScene* Scene = Generator->GeneratedScene.Get();
-			TestEqual(TEXT("Only branching nodes produce junctions"), Scene->Junctions.Num(), Degree == 2 ? 0 : 1);
-			TestEqual(TEXT("Two same-style roads merge at any angle"), Scene->Roads.Num(), Degree == 2 ? 1 : Degree);
-			if (Degree == 2)
+			TestEqual(TEXT("Branches and sharp bends produce junctions"), Scene->Junctions.Num(), 1);
+			TestEqual(TEXT("Sharp bends keep both source approaches"), Scene->Roads.Num(), Degree);
+			if (Degree == 2 && Scene->Junctions.Num() == 1)
 			{
-				TestTrue(TEXT("Merged road retains both source IDs"), Scene->Roads[0]->Tags.Contains(TEXT("OSMWay_1")) && Scene->Roads[0]->Tags.Contains(TEXT("OSMWay_2")));
-				TestEqual(TEXT("The bend's shared node remains a curve control"), CastChecked<AOsmRoadActor>(Scene->Roads[0])->ImportedPositions.Num(), 3);
+				TestEqual(TEXT("Both arms remain in the native junction"), Scene->Junctions[0]->Gates.Num(), 2);
+				TestTrue(TEXT("Sharp bend junction has a central surface"), CastChecked<UStaticMeshComponent>(Scene->Junctions[0]->GetRootComponent())->GetStaticMesh() != nullptr);
+				Generator->MaxTwoArmBendAngleDegrees = 180;
+				if (TestTrue(TEXT("Threshold change regenerates unchanged ways"), Generator->BuildRoads(Ways, NAME_None)))
+				{
+					TestEqual(TEXT("Raising the threshold permits merging the bend"), Generator->GeneratedScene.Get()->Roads.Num(), 1);
+					TestEqual(TEXT("Threshold change removes the former junction"), Generator->GeneratedScene.Get()->Junctions.Num(), 0);
+				}
+				Generator->MaxTwoArmBendAngleDegrees = 45;
+				if (TestTrue(TEXT("Restoring the threshold regenerates unchanged ways"), Generator->BuildRoads(Ways, NAME_None)))
+					TestEqual(TEXT("Restored threshold brings back the junction"), Generator->GeneratedScene.Get()->Junctions.Num(), 1);
 			}
 		}
 	}
@@ -511,6 +595,12 @@ bool FRoadGeneratorSharedNodeTest::RunTest(const FString& Parameters)
 	Different->LeftLanes[0].Width += 100;
 	Generator->HighwayStyles.Add(TEXT("primary"), Different);
 	Ways[1].Tags.Add(TEXT("highway"), TEXT("primary"));
+	if (TestTrue(TEXT("Different styles at a sharp bend build"), Generator->BuildRoads(Ways, NAME_None)))
+	{
+		TestEqual(TEXT("Different styles at a sharp bend use a junction"), Generator->GeneratedScene.Get()->Junctions.Num(), 1);
+		TestEqual(TEXT("Sharp bend has no transition span"), Generator->GeneratedScene.Get()->Roads.Num(), 2);
+	}
+	Ways[1].Points.Last().WorldLocation = FVector(10000, 1000, 100);
 	for (bool bExpansion : { false, true })
 	for (bool bReverse : { false, true })
 	{
@@ -546,6 +636,14 @@ bool FRoadGeneratorSharedNodeTest::RunTest(const FString& Parameters)
 			}
 		}
 		if (bReverse) Algo::Reverse(Ways[0].Points);
+	}
+	Ways[1].Tags.Add(TEXT("highway"), TEXT("residential"));
+	Ways[0].Tags.Add(TEXT("lanes"), TEXT("2"));
+	Ways[1].Tags.Add(TEXT("lanes"), TEXT("2"));
+	if (TestTrue(TEXT("Gentle same-style bend builds"), Generator->BuildRoads(Ways, NAME_None)))
+	{
+		TestEqual(TEXT("Gentle matching roads merge"), Generator->GeneratedScene.Get()->Roads.Num(), 1);
+		TestEqual(TEXT("Gentle matching roads need no junction"), Generator->GeneratedScene.Get()->Junctions.Num(), 0);
 	}
 	Generator->ClearRoads();
 	World->DestroyWorld(false);

@@ -41,3 +41,12 @@ Build before testing. Add regression coverage for changed behavior; no numerical
 ## Commit & Pull Request Guidelines
 
 History is limited; the visible subject `add RoadGeneration module.` uses a short action-oriented description. Use concise imperative subjects and focused commits. PRs should explain behavior changes, validation, related issues, and asset/configuration changes; include screenshots for visual changes. Preserve class redirects when renaming saved Unreal types. Keep generated caches and build outputs out of commits, and track binary assets through Git LFS.
+
+## Edition
+
+- Never edit plugins these installed to engine.
+- Edit project plugins with verification.
+- Use forward declaration in .h instead of only defination in .cpp file
+so we don't have to add anonymous namespace or static specifier to make
+class or function internal.
+- Put .cpp files in Private directory and .h in Public directory.

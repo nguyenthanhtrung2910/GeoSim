@@ -5,7 +5,6 @@
 #include "FrameCaptureManager.h"
 #include "LandscapeTreeScatter.h"
 #include "ThirdPersonCharacter.h"
-#include "VitruvioBuildingsFromSplines.h"
 #include "Misc/AutomationTest.h"
 #include "UObject/SoftObjectPath.h"
 
@@ -15,7 +14,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FGeoSimModuleRedirectTest,
 
 bool FGeoSimModuleRedirectTest::RunTest(const FString& Parameters)
 {
-    auto CheckSavedType = [this](const TCHAR* OldPath, UObject* ExpectedType)
+    auto check_saved_type = [this](const TCHAR* OldPath, UObject* ExpectedType)
     {
         FSoftObjectPath Path(OldPath);
         TestTrue(FString::Printf(TEXT("Redirect registered for %s"), OldPath), Path.FixupCoreRedirects());
@@ -23,13 +22,12 @@ bool FGeoSimModuleRedirectTest::RunTest(const FString& Parameters)
         TestEqual(TEXT("Saved type can still be loaded"), Path.TryLoad(), ExpectedType);
     };
 
-    CheckSavedType(TEXT("/Script/Landscapes.ThirdPersonCharacter"), AThirdPersonCharacter::StaticClass());
-    CheckSavedType(TEXT("/Script/Landscapes.FrameCaptureManager"), AFrameCaptureManager::StaticClass());
-    CheckSavedType(TEXT("/Script/Landscapes.LandscapeTreeScatter"), ALandscapeTreeScatter::StaticClass());
-    CheckSavedType(TEXT("/Script/Landscapes.VitruvioBuildingsFromSplines"), AVitruvioBuildingsFromSplines::StaticClass());
-    CheckSavedType(TEXT("/Script/Landscapes.ArcGISMiniMapHUD"), AArcGisMiniMapHUD::StaticClass());
-    CheckSavedType(TEXT("/Script/Landscapes.ArcGISMiniMapWidget"), UArcGisMiniMapWidget::StaticClass());
-    CheckSavedType(TEXT("/Script/Landscapes.ECustomImageFormat"), StaticEnum<ECustomImageFormat>());
+    check_saved_type(TEXT("/Script/Landscapes.ThirdPersonCharacter"), AThirdPersonCharacter::StaticClass());
+    check_saved_type(TEXT("/Script/Landscapes.FrameCaptureManager"), AFrameCaptureManager::StaticClass());
+    check_saved_type(TEXT("/Script/Landscapes.LandscapeTreeScatter"), ALandscapeTreeScatter::StaticClass());
+    check_saved_type(TEXT("/Script/Landscapes.ArcGISMiniMapHUD"), AArcGisMiniMapHUD::StaticClass());
+    check_saved_type(TEXT("/Script/Landscapes.ArcGISMiniMapWidget"), UArcGisMiniMapWidget::StaticClass());
+    check_saved_type(TEXT("/Script/Landscapes.ECustomImageFormat"), StaticEnum<ECustomImageFormat>());
     return true;
 }
 

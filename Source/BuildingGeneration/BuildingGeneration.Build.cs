@@ -6,9 +6,11 @@ public class BuildingGeneration : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 		PublicDependencyModuleNames.AddRange([
-			"Core", "CoreUObject", "Engine", "PCG", "SplineImporter", "LCCommon",
-			"Coordinates", "Landscape", "GDALInterface", "ConcurrencyHelpers"
+			"Core", "CoreUObject", "Engine", "PCG", "LCCommon", "Vitruvio"
 		]);
-		PrivateDependencyModuleNames.AddRange(["XmlParser", "OSMUserData"]);
+		PrivateDependencyModuleNames.AddRange([
+			"XmlParser", "OSMUserData", "Coordinates", "Landscape", "GDALInterface", "LandscapeUtils", "SplineImporter", "ConcurrencyHelpers"
+		]);
+		if (target.bBuildEditor) PrivateDependencyModuleNames.Add("UnrealEd");
 	}
 }

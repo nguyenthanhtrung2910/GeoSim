@@ -192,9 +192,17 @@ apply only through **Generate Landscape Splines**; editing **Terrain Deform** do
 
 Shared positive OSM node IDs determine connectivity. Ways are split at shared nodes,
 so their junction endpoints remain fixed while Road Constructor rounds interior controls.
-Only nodes with at least three connecting road arms create junctions; positions alone never create a junction. **Highway Filter** is the only tag-based
-selection rule: listed `highway` values are included, and an empty list includes all
-highway values. There are no built-in exclusions for road classes, bridges, tunnels,
+Branching nodes and sharp two-arm bends create junctions; positions alone never create a junction.
+**Highway Filter** includes listed `highway` values, and an empty list includes all
+highway values. **Excluded Road Tags**, under **Road Constructor → Import**, removes a way
+when any configured tag/value pair matches exactly (case-sensitive). For example, add
+tag `footway` and value `sidewalk` to exclude sidewalks while retaining other footways.
+Add another row with tag `footway` and value `crossing` to exclude both values. Rows use
+OR matching, and repeated tags are allowed. The exclusion list defaults to empty;
+saved exclusions from the former map migrate into the list on load.
+Excluded ways do not split retained roads or contribute
+junction arms. Changes apply on the next generation button press; edits to excluded ways
+do not invalidate existing output. There are no built-in exclusions for road classes, bridges, tunnels,
 nonzero layers, or areas. Assign base styles in **Highway Styles**. Layer values still
 distinguish shared-node connectivity. Missing terrain samples
 split a way unless **Require Terrain Samples** is disabled.
@@ -210,15 +218,19 @@ author tangents if such a road must curve. Regenerate roads after changing this 
 radius fitting to Road Constructor. Enable it to seed links with **Junction Radius Cm**;
 the plugin still solves the final corner radii and cut distances. Regenerate roads after
 changing this option.
-Two-arm shared nodes are handled before actor creation. Compatible ways using the same
-selected source style and effective lane layout merge regardless of angle; the shared point
+Two-arm shared nodes are handled before actor creation. First, **Max Two Arm Bend Angle Degrees**
+(default 45 degrees) separates gentle bends from sharp bends. Zero means straight travel;
+a bend above the threshold creates a native two-arm junction, regardless of style.
+Very low thresholds can send nearly straight, unequal-width connections to the native
+junction solver, whose surface triangulation can fail; retain a gentle-bend allowance.
+On gentle bends, compatible ways using the same selected source style and effective lane layout merge; the shared point
 remains a curve control and all source way IDs remain in the actor's tags. Merge comparisons
 use source assets rather than per-way copies. Reversing asymmetric lane layouts remains
 protected, and intentional split loops remain split. Scene ownership boundaries are retained.
 
 Nodes with three or more connecting road arms create junctions. Count road arms, not distinct
 OSM way IDs: a through-way plus one branch has three arms and remains a T-junction.
-Two-arm style or lane-count changes receive a separate native Road Transition segment.
+Gentle two-arm style or lane-count changes receive a separate native Road Transition segment.
 **Road Transition Length Cm** controls its desired combined length (default 6,000 cm);
 each approach contributes at most a quarter of its remaining length. Source and target styles
 are oriented to the transition direction and saved with the scene. The native lane-width
@@ -271,7 +283,7 @@ adapter is for generating a managed network, rather than round-tripping manual e
 The previous custom road, bridge, sidewalk and lamp mesh generators have been removed.
 RoadForge is disabled and is no longer a project module dependency. Existing saved
 visual output is not automatically deleted from levels. There is no separate bridge
-generator; ways are selected solely by **Highway Filter**.
+generator; ways are selected by **Highway Filter** and **Excluded Road Tags**.
 The shared road cache now belongs to OSMRoadImporter. SplineImporter and the building
 import workflow remain independent of road generation.
 
@@ -279,5 +291,5 @@ import workflow remain independent of road generation.
 
 Editor automation tests: `Landscapes.RoadConstructor`.
 Test implementations live in `Source/RoadGeneration/Private/Tests`.
-They check shared-node splitting, coincident unconnected nodes, highway-only filtering,
+They check shared-node splitting, coincident unconnected nodes, highway and tag filtering,
 terrain gaps, and native road/junction mesh generation and regeneration.

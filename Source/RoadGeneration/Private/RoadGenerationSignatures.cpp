@@ -3,6 +3,7 @@
 
 #if WITH_EDITOR
 #include "RoadGenerator.h"
+#include "RoadGeneratorInternal.h"
 #include "OsmRoadScene.h"
 #include "ImportedRoadData.h"
 #include "Engine/DataAsset.h"
@@ -144,7 +145,7 @@ namespace RoadGenerationSignatures
 	FString InputSignature(const ARoadGenerator& Generator, const TArray<FImportedRoadWay>& Ways, const FName /*OutputFolder*/, bool bGeometryOnly)
 	{
 		FSignature Hash(bGeometryOnly);
-		Hash.Named(&Generator, { TEXT("SurfaceOffsetCm"), TEXT("RoadCurveRadiusCm"), TEXT("RoadTransitionLengthCm"), TEXT("JunctionMergeDistanceCm"),
+		Hash.Named(&Generator, { TEXT("SurfaceOffsetCm"), TEXT("RoadCurveRadiusCm"), TEXT("RoadTransitionLengthCm"), TEXT("MaxTwoArmBendAngleDegrees"), TEXT("JunctionMergeDistanceCm"),
 			TEXT("bRequireTerrainSamples"), TEXT("RoadSceneSizeCm") });
 		if (!bGeometryOnly)
 		{
@@ -156,8 +157,8 @@ namespace RoadGenerationSignatures
 		TArray<const FImportedRoadWay*> Selected;
 		for (const FImportedRoadWay& Way : Ways)
 		{
-			if (const FString* Highway = Way.Tags.Find(TEXT("highway")); Highway && !Highway->IsEmpty() && (Generator.
-				HighwayFilter.IsEmpty() || Generator.HighwayFilter.Contains(FName(**Highway)))) Selected.Add(&Way);
+			if (RoadGeneratorInternal::MatchesHighwayFilter(Way, Generator.HighwayFilter) &&
+				!RoadGeneratorInternal::MatchesExcludedRoadTags(Way, Generator.ExcludedRoadTagRules)) Selected.Add(&Way);
 		}
 		Selected.Sort([](const FImportedRoadWay& A, const FImportedRoadWay& B) { return A.WayId < B.WayId; });
 		Hash.Number(Selected.Num());

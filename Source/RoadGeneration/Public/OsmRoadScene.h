@@ -79,6 +79,10 @@ public:
 	UPROPERTY()
 	TArray<TObjectPtr<ARoadActor>> ImportedConnectorRoads;
 
+	/** Two-arm nodes explicitly classified as sharp bends during button-driven import. */
+	UPROPERTY()
+	TSet<FString> ImportedTwoArmJunctionKeys;
+
 	bool PrepareRoadCurves();
 	bool SolveJunctions(bool bRestoreCurves = true);
 	bool BuildSurfaceMeshes();

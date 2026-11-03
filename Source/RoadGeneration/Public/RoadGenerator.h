@@ -12,6 +12,19 @@ class ALandscape;
 class ALandscapeSplineActor;
 struct FImportedRoadWay;
 
+/** One exact OSM tag/value exclusion. Repeated tags allow excluding multiple values. */
+USTRUCT(BlueprintType)
+struct ROADGENERATION_API FExcludedRoadTag
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor")
+	FString Tag;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor")
+	FString Value;
+};
+
 namespace RoadGeneratorInternal
 {
 	struct FImportSpan
@@ -37,11 +50,11 @@ namespace RoadGeneratorInternal
 	/** Keep each junction in one grid cell; cut roads between cells at their midpoint. */
 	TArray<FSceneSpans> PartitionSpans(const TArray<FImportSpan>& Spans, double SceneSizeCm);
 
-	TArray<FImportSpan> PrepareSpans(const TArray<FImportedRoadWay>& Ways, const TArray<FName>& Filter, bool bRequireTerrain, double HeightOffset, double MergeDistance = 1000.0);
+	TArray<FImportSpan> PrepareSpans(const TArray<FImportedRoadWay>& Ways, const TArray<FName>& Filter, bool bRequireTerrain, double HeightOffset, double MergeDistance = 1000.0, const TArray<FExcludedRoadTag>& ExcludedTags = {});
 	/** Always copies the base style; absent/invalid lane counts preserve its layout. */
 	URoadStyle* CreateLaneCountStyle(UObject* Outer, const URoadStyle* Source, int32 LaneCount);
 	/** Join compatible ways only at two-arm shared nodes, retaining intermediate controls and source IDs. */
-	int32 MergeSharedNodeSpans(TArray<FImportSpan>& Spans, const TFunctionRef<URoadStyle*(const FImportSpan&)>& ResolveStyle);
+	int32 MergeSharedNodeSpans(TArray<FImportSpan>& Spans, const TFunctionRef<URoadStyle*(const FImportSpan&)>& ResolveStyle, double MaxBendAngleDegrees = 45.0);
 }
 
 /**
@@ -60,6 +73,7 @@ class ROADGENERATION_API ARoadGenerator : public AActor, public ILCGenerator
 	GENERATED_BODY()
 public:
 	ARoadGenerator();
+	virtual void PostLoad() override;
 
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Road Constructor|Import")
 	TObjectPtr<AOsmRoadImporter> OsmRoadImporter;
@@ -76,9 +90,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor|Highway")
 	TMap<FName, TObjectPtr<URoadStyle>> HighwayStyles;
 
-	/** Only these OSM highway values are selected. Empty includes every highway value; no other tags exclude ways. */
+	/** Only these OSM highway values are selected. Empty includes every highway value, subject to Excluded Road Tags. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor|Import")
 	TArray<FName> HighwayFilter;
+
+	/** Exclude a way when any exact, case-sensitive row matches. Repeat a tag to exclude multiple values. Empty excludes nothing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor|Import", meta = (DisplayName = "Excluded Road Tags", TitleProperty = "{Tag} = {Value}"))
+	TArray<FExcludedRoadTag> ExcludedRoadTagRules;
+
+	/** Legacy map retained to migrate saved exclusions into the list during load. */
+	UPROPERTY()
+	TMap<FString, FString> ExcludedRoadTags;
 
 	/** Grid size for scene ownership. Junctions stay intact; roads between cells are split at their midpoint. This is not a hard bound on road count or scene extent. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor|Import", meta = (ClampMin = "1000", Units = "cm"))
@@ -95,6 +117,10 @@ public:
 	/** Desired combined length of a native style transition around a two-arm node. Each approach uses at most a quarter of its available length. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor|Shape", meta = (ClampMin = "100", Units = "cm"))
 	double RoadTransitionLengthCm = 6000.0;
+
+	/** Maximum change in travel direction for merging or transitioning two arms. Zero is straight; sharper bends use junctions. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor|Shape", meta = (ClampMin = "0", ClampMax = "180", Units = "deg"))
+	double MaxTwoArmBendAngleDegrees = 45.0;
 	
 	/** Remove junction sidewalk/curb corner roads if Road Constructor fails to build the central asphalt surface. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Road Constructor|Shape")
@@ -194,6 +220,7 @@ private:
 	friend class FRoadGeneratorChangeDetectionTest;
 	friend class FRoadGeneratorScenePartitionTest;
 	friend class FRoadGeneratorSharedNodeTest;
+	friend class FRoadGeneratorTagExclusionTest;
 
 	bool bGenerationInProgress = false;
 	UPROPERTY()

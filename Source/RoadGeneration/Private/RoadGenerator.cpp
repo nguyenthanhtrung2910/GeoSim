@@ -5,7 +5,7 @@
 #include "Components/SceneComponent.h"
 #include "ConcurrencyHelpers/Concurrency.h"
 #include "OsmRoadScene.h"
-#include "OSMRoadImporter.h"
+#include "OsmRoadImporter.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Algo/Reverse.h"
 #include "Landscape.h"
@@ -188,6 +188,16 @@ namespace RoadGeneratorInternal
 		return Highway && !Highway->IsEmpty() && (Filter.IsEmpty() || Filter.Contains(FName(**Highway)));
 	}
 
+	bool MatchesExcludedRoadTags(const FImportedRoadWay& Way, const TArray<FExcludedRoadTag>& ExcludedTags)
+	{
+		for (const FExcludedRoadTag& Rule : ExcludedTags)
+		{
+			if (Rule.Tag.IsEmpty()) continue;
+			if (const FString* Actual = Way.Tags.Find(Rule.Tag); Actual && Actual->Equals(Rule.Value, ESearchCase::CaseSensitive)) return true;
+		}
+		return false;
+	}
+
 	FString NodeKey(const FImportedRoadWay& Way, const FImportedRoadPoint& Point)
 	{
 		if (Point.NodeId <= 0) return FString();
@@ -348,13 +358,13 @@ namespace RoadGeneratorInternal
 	}
 
 	TArray<FImportSpan> PrepareSpans(const TArray<FImportedRoadWay>& Ways, const TArray<FName>& Filter,
-	                                 bool bRequireTerrain, double HeightOffset, double MergeDistance)
+	                                 bool bRequireTerrain, double HeightOffset, double MergeDistance, const TArray<FExcludedRoadTag>& ExcludedTags)
 	{
 		TArray<const FImportedRoadWay*> Selected;
 		TMap<FString, int32> Occurrences;
 		for (const FImportedRoadWay& Way : Ways)
 		{
-			if (!MatchesHighwayFilter(Way, Filter)) continue;
+			if (!MatchesHighwayFilter(Way, Filter) || MatchesExcludedRoadTags(Way, ExcludedTags)) continue;
 			Selected.Add(&Way);
 			for (const FImportedRoadPoint& Point : Way.Points)
 			{
@@ -480,6 +490,37 @@ namespace RoadGeneratorInternal
 		return true;
 	}
 
+	double SharedNodeBendAngle(const TArray<FVector>& A, bool bAStart, const TArray<FVector>& B, bool bBStart)
+	{
+		if (A.Num() < 2 || B.Num() < 2) return 180.0;
+		const FVector2D OutA = FVector2D(bAStart ? A[1] - A[0] : A[A.Num() - 2] - A.Last()).GetSafeNormal();
+		const FVector2D OutB = FVector2D(bBStart ? B[1] - B[0] : B[B.Num() - 2] - B.Last()).GetSafeNormal();
+		if (OutA.IsNearlyZero() || OutB.IsNearlyZero()) return 180.0;
+		return FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(-FVector2D::DotProduct(OutA, OutB), -1.0, 1.0)));
+	}
+
+	TSet<FString> FindSharpSharedNodes(const TArray<FImportSpan>& Spans, double MaxBendAngleDegrees)
+	{
+		struct FEndpoint { int32 Index; bool bStart; };
+		TMap<FString, TArray<FEndpoint>> Endpoints;
+		for (int32 Index = 0; Index < Spans.Num(); ++Index)
+		{
+			if (!Spans[Index].StartKey.IsEmpty()) Endpoints.FindOrAdd(Spans[Index].StartKey).Add({ Index, true });
+			if (!Spans[Index].EndKey.IsEmpty()) Endpoints.FindOrAdd(Spans[Index].EndKey).Add({ Index, false });
+		}
+		TSet<FString> Result;
+		for (const auto& [Key, Ends] : Endpoints)
+		{
+			if (Ends.Num() != 2 || Ends[0].Index == Ends[1].Index) continue;
+			const auto& A = Spans[Ends[0].Index].Positions;
+			const auto& B = Spans[Ends[1].Index].Positions;
+			if (A.Num() < 2 || B.Num() < 2) continue;
+			if (!(Ends[0].bStart ? A[0] : A.Last()).Equals(Ends[1].bStart ? B[0] : B.Last(), 1.0)) continue;
+			if (SharedNodeBendAngle(A, Ends[0].bStart, B, Ends[1].bStart) > FMath::Clamp(MaxBendAngleDegrees, 0.0, 180.0)) Result.Add(Key);
+		}
+		return Result;
+	}
+
 	double SpanLength(const TArray<FVector>& Positions)
 	{
 		double Length = 0;
@@ -508,7 +549,7 @@ namespace RoadGeneratorInternal
 	}
 
 	int32 CreateTransitionSpans(TArray<FImportSpan>& Spans, AOsmRoadScene* Owner, double TransitionLengthCm,
-		const TFunctionRef<URoadStyle*(const FImportSpan&)>& ResolveStyle)
+		const TFunctionRef<URoadStyle*(const FImportSpan&)>& ResolveStyle, double MaxBendAngleDegrees)
 	{
 		struct FEndpoint { int32 Index; bool bStart; };
 		TMap<FString, TArray<FEndpoint>> Endpoints;
@@ -528,6 +569,8 @@ namespace RoadGeneratorInternal
 			const FEndpoint AEnd = Ends[0], BEnd = Ends[1];
 			FImportSpan& A = Spans[AEnd.Index];
 			FImportSpan& B = Spans[BEnd.Index];
+			if (A.Positions.Num() < 2 || B.Positions.Num() < 2 ||
+				SharedNodeBendAngle(A.Positions, AEnd.bStart, B.Positions, BEnd.bStart) > FMath::Clamp(MaxBendAngleDegrees, 0.0, 180.0)) continue;
 			const FVector ANode = AEnd.bStart ? A.Positions[0] : A.Positions.Last();
 			if (const FVector BNode = BEnd.bStart ? B.Positions[0] : B.Positions.Last(); !ANode.Equals(BNode, 1.0)) continue;
 			URoadStyle* AStyle = ResolveStyle(A);
@@ -599,7 +642,7 @@ namespace RoadGeneratorInternal
 		return FirstLeft.Num() == SecondLeft.Num() && FirstRight.Num() == SecondRight.Num();
 	}
 
-	int32 MergeSharedNodeSpans(TArray<FImportSpan>& Spans, const TFunctionRef<URoadStyle*(const FImportSpan&)>& ResolveStyle)
+	int32 MergeSharedNodeSpans(TArray<FImportSpan>& Spans, const TFunctionRef<URoadStyle*(const FImportSpan&)>& ResolveStyle, double MaxBendAngleDegrees)
 	{
 		struct FEndpoint { int32 SpanIndex; bool bStart; };
 		TMap<FString, TArray<FEndpoint>> Endpoints;
@@ -625,6 +668,7 @@ namespace RoadGeneratorInternal
 			FImportSpan& A = Spans[First.SpanIndex];
 			FImportSpan& B = Spans[Second.SpanIndex];
 			if (A.Positions.Num() < 2 || B.Positions.Num() < 2) continue;
+			if (SharedNodeBendAngle(A.Positions, First.bStart, B.Positions, Second.bStart) > FMath::Clamp(MaxBendAngleDegrees, 0.0, 180.0)) continue;
 			const URoadStyle* Style = ResolveStyle(A);
 			if (Style != ResolveStyle(B) || !HasMatchingLaneCountLayout(Style, A.LaneCount, B.LaneCount)) continue;
 			if ((First.bStart || !Second.bStart) && !HasSymmetricLaneStyle(Style, A.LaneCount)) continue;
@@ -684,6 +728,17 @@ ARoadGenerator::ARoadGenerator()
 		TEXT("unclassified"), TEXT("residential"), TEXT("living_street"),
 		TEXT("motorway_link"), TEXT("trunk_link"), TEXT("primary_link"), TEXT("secondary_link"), TEXT("tertiary_link")
 	};
+}
+
+void ARoadGenerator::PostLoad()
+{
+	Super::PostLoad();
+	for (const auto& [Tag, Value] : ExcludedRoadTags)
+	{
+		if (!ExcludedRoadTagRules.ContainsByPredicate([&](const FExcludedRoadTag& Rule) { return Rule.Tag == Tag && Rule.Value == Value; }))
+			ExcludedRoadTagRules.Add({ Tag, Value });
+	}
+	ExcludedRoadTags.Reset();
 }
 
 void ARoadGenerator::GenerateRoads()
@@ -1146,7 +1201,7 @@ TArray<AOsmRoadScene*> ARoadGenerator::PrepareRoadCurves(const TArray<FImportedR
 {
 #if WITH_EDITOR
 	const FName Folder = ResolveOutputFolder(OutputFolderPath);
-	const TArray<FImportSpan> ImportedSpans = PrepareSpans(Ways, HighwayFilter, bRequireTerrainSamples, SurfaceOffsetCm, JunctionMergeDistanceCm);
+	const TArray<FImportSpan> ImportedSpans = PrepareSpans(Ways, HighwayFilter, bRequireTerrainSamples, SurfaceOffsetCm, JunctionMergeDistanceCm, ExcludedRoadTagRules);
 	if (ImportedSpans.IsEmpty())
 	{
 		UE_LOG(LogRoadConstructorImport, Error, TEXT("The cache contains no usable roads for the selected filter. Previous output was kept."));
@@ -1188,8 +1243,9 @@ TArray<AOsmRoadScene*> ARoadGenerator::PrepareRoadCurves(const TArray<FImportedR
 			const auto* Override = HighwayStyles.Find(Span.Highway);
 			return Override && IsValid(Override->Get()) ? Override->Get() : DefaultRoadStyle.Get();
 		};
-		const int32 Merged = MergeSharedNodeSpans(Spans, resolve_source_style);
-		CreateTransitionSpans(Spans, Candidate, RoadTransitionLengthCm, resolve_style);
+		Candidate->ImportedTwoArmJunctionKeys = FindSharpSharedNodes(Spans, MaxTwoArmBendAngleDegrees);
+		const int32 Merged = MergeSharedNodeSpans(Spans, resolve_source_style, MaxTwoArmBendAngleDegrees);
+		CreateTransitionSpans(Spans, Candidate, RoadTransitionLengthCm, resolve_style, MaxTwoArmBendAngleDegrees);
 		UE_LOG(LogRoadConstructorImport, Display, TEXT("Merged %d compatible two-arm shared-node connections in scene cell %d,%d."),
 			Merged, Cell.X, Cell.Y);
 		Candidate->bOverrideJunctionRadius = bOverrideJunctionRadius;

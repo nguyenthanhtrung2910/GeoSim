@@ -1,62 +1,96 @@
-# Footprint buildings
+# Building import and generation
 
-`AFootprintBuilding` lives in `Source/BuildingGeneration/` and owns a
-`FootprintSpline` and a `PCGComponent`. It is a target
-for Landscape Combinator's Spline Importer **Custom Actor** mode.
+The workflow is `OsmBuidingImporter -> cached building records -> BuildingGenerator -> output actors`.
 
-## Local Overpass OSM files
+## Import
 
-Place **OSM Building Importer** (`AOsmBuildingImporter`) from the BuildingGeneration
-module to import raw `.osm` or `.xml` files exported by Overpass Turbo. This subclasses
-Spline Importer and defaults to **Local File**, **Custom Actor**, and **FootprintBuilding**.
-Set **Local File**, select the terrain under **Actors Or Landscapes To Place Splines
-Selection**, and choose your building Blueprint as **Actor To Spawn**. Click **Import**.
-Enable **Delete Old Splines When Creating Splines** when replacing earlier output.
+Place **OSM Building Importer**, choose the source, configure **Terrain Selection**,
+and click **Import**. Local files must contain raw OSM XML with closed building ways
+and their referenced nodes. Overpass queries must return XML. Relation multipolygons,
+courtyard holes, and Overpass JSON are not supported.
 
-The loader resolves closed ways tagged `building` and their referenced nodes directly,
-including exports with the XML declaration and `<osm>` on the same line. Export the
-referenced nodes too: `way["building"]({{bbox}}); (._;>;); out body;` with `[out:xml];`.
-Open outlines and `building=no` are skipped; relation-only multipolygons and courtyard
-holes are not supported by this loader. OSM tags, including `height` and `building:levels`,
-are attached to each spline as OSM user data. These tags do not automatically configure
-the building's PCG graph. Imported footprint edges are linear.
+The importer creates no actors, splines, or meshes. It caches OSM IDs, raw tags, and
+complete terrain-following footprint rings in world centimeters. Coordinate conversion
+uses Landscape Combinator utilities. Entire footprints with missing terrain hits are
+skipped, with their IDs and failed corners logged.
 
-Other file formats and Overpass sources retain the parent importer's loading behavior.
-The only shared plugin change is making its dataset-loading method virtual so this
-project-specific loader can override it. No downloaded files are rewritten.
+The cache is memory-only: reimport after reopening or changing source, coordinates,
+placement, or bounds. Failed imports invalidate the cache. **Clear** clears source
+data and invalidates pending results; it does not delete generated buildings.
 
-## Building generation
+## Generate
 
-1. Create a Blueprint subclass of `FootprintBuilding`.
-2. Select its PCG component and assign a wrapper graph that reads spline data
-   from **Self**, supplies City Sample data, and calls
-   `Assign_CitySampleBuildings`. Connect any subsequent generation/spawning
-   stages required by that graph. The C++ actor does not supply City Sample data
-   or create this wrapper graph.
-3. In Spline Importer, disable **Use Landscape Splines**, set **Spline Owner
-   Kind** to **Custom Actor**, and select the Blueprint as **Actor To Spawn**.
-4. Import the footprints. Each imported spline receives its own building actor.
-5. Select the resulting actors and click **Generate Building**. Use **Clear
-   Building** to remove their PCG output while retaining their footprints.
+Place **Building Generator**, assign **Importer** and **Rule Package**. Click
+**Generate Buildings**. Generation only reads a valid cache; it never downloads.
+The generator owns its output actors and **Clear Buildings** action. By default it
+replaces previous output. **Flatten Footprints** flattens copies to their highest
+corner while preserving the original cache.
 
-Generation requires a closed spline with at least three points and an assigned
-graph. It runs on demand: spawning, loading, and editing the actor do not
-automatically generate buildings with the default component settings. This
-avoids generating before the importer has filled the spline.
+### Heights
 
-**Generate Building** calls `PreprocessFootprint()` before invalidating PCG's
-cached input and generating. By default, **Flatten Footprint** moves all corners
-to the highest corner's world-space Z, preserving their world-space X/Y and the
-closed loop. Custom spline tangents are flattened too. Each building uses its
-own elevation; this does not sample terrain inside the footprint or create
-foundation geometry. Disable **Flatten Footprint** to keep the imported heights.
-Preprocessing changes the source spline; reimport to restore its original heights.
+Configure **Heights > Min Floor Height Meters**, **Max Floor Height Meters**, and
+**Seed**. One floor height is sampled per OSM ID, reproducibly for the same seed
+and range. Building height follows RoadForge's positive-value priority:
 
-Use the actor's **Generate Building** action: the PCG component's own **Generate**
-button bypasses preprocessing. The actor does not derive height, floor count, or
-style from OSM metadata.
+1. OSM `height` in meters (including a trailing ` m`).
+2. Otherwise `building:levels * sampled floor height`.
+3. Otherwise **Default Building Height Meters**, initially 12 m.
 
-The automation tests are `GeoSim.FootprintBuilding.ImportTarget`,
-`GeoSim.FootprintBuilding.Preprocess`, and
-`GeoSim.BuildingGeneration.ClassRedirects`. A class redirect preserves saved
-references to the former `/Script/GeoSim.FootprintBuilding` path.
+The optional floor-count override is `max(1, floor(building height / floor height))`.
+Explicit height takes priority when it disagrees with the levels tag. No interior
+floor slabs are implied by this count.
+
+### Vitruvio rule attributes
+
+Assign **Rule Package**, then enter the numeric keys exposed by that package:
+
+- **Floor Height Attribute** receives the sampled floor height.
+- **Building Height Attribute** receives the calculated building height.
+- **Floor Count Attribute** optionally receives the derived floor count.
+
+Full style/import keys are accepted, as are unique names displayed in Vitruvio's
+Details panel (for example `Floor_Height`). Ambiguous displayed names require the
+full key. Error messages list available numeric keys. Empty names retain package
+defaults. Names must resolve to distinct attributes. **Rule Units Per Meter**
+is 1 for rules using meters, or 100 for centimeters; this affects heights, not count.
+
+The generator evaluates the package's attributes without generating geometry, waits
+for completion, validates the configured keys and numeric types, sets per-actor
+user overrides, then reevaluates and generates. Missing or wrongly typed keys are
+reported instead of silently generating defaults. The shared rule-package asset
+is not modified.
+
+Auto Generate is temporarily disabled while package defaults load. It is enabled
+after the overrides are successfully applied, and the first model is generated
+automatically. There is no need to enable it by hand; toggling it later retains
+the user-set height overrides.
+
+Output actors preserve raw tags as UOSMUserData on their root component.
+
+When the package exposes a `Level_of_Detail` dropdown with a `high` option, the
+generator sets that option before the first model generation. It uses the exact
+spelling supplied by the package and preserves it as a user override. Packages
+without a compatible dropdown keep their own default.
+
+## Generated actors
+
+BuildingGenerator spawns standard **Vitruvio Actors** with the imported footprint,
+configured height overrides, and high detail when supported by the rule package.
+It does not capture persistent geometry or build Nanite data. Existing generated
+actors are replaced only when you run generation with replacement enabled.
+
+## Migration and validation
+
+The removed persistent building actor and component redirect to standard Vitruvio
+types. Their automatic geometry capture and Nanite build support have been
+removed. Regenerate old output to return to the standard workflow.
+
+The importer class redirect is retained. Previously imported actors remain in the
+level; remove old output when switching to this workflow. Output replacement,
+folders, and generation now belong to BuildingGenerator. The legacy
+VitruvioBuildingsFromSplines class has been removed; saved references redirect to
+BuildingGenerator. Assign an importer to migrated actors and import source data
+before generating. BuildingGenerator now generates Vitruvio actors only.
+
+Tests cover GeoSim.BuildingGeneration.* and GeoSim.FootprintBuilding.*. Verify
+actual Vitruvio appearance using the chosen installed rule package.

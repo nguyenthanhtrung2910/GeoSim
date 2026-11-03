@@ -1,4 +1,4 @@
-#include "OSMRoadImporter.h"
+#include "OsmRoadImporter.h"
 
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 #include "Coordinates/LevelCoordinates.h"

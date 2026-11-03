@@ -12,7 +12,7 @@ public class GeoSim : ModuleRules
 		PublicDependencyModuleNames.AddRange(["Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "PCG", "ImageWrapper", "RenderCore", "Renderer", "RHI", "UMG"]);
         PublicDependencyModuleNames.Add("LCCommon");
         //PrivateDependencyModuleNames.AddRange(["ArcGISMapsSDK", "GeoReferencing", "Landscape", "SplineImporter", "Coordinates", "GDALInterface", "LCCommon", "ConcurrencyHelpers", "OSMUserData", "Vitruvio", "ImageCore"]);
-        PrivateDependencyModuleNames.AddRange(["GeoReferencing", "Landscape", "SplineImporter", "Coordinates", "GDALInterface", "ConcurrencyHelpers", "OSMUserData", "Vitruvio", "ImageCore"]);
+        PrivateDependencyModuleNames.AddRange(["GeoReferencing", "Landscape", "SplineImporter", "Coordinates", "GDALInterface", "ConcurrencyHelpers", "OSMUserData", "ImageCore"]);
         PrivateDependencyModuleNames.AddRange(["HTTP", "Json", "Slate", "SlateCore"]);
 
         // ArcGISMapActor.h includes SDK headers located under the plugin's Internal directory.
