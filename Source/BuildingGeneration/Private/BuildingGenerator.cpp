@@ -1,4 +1,5 @@
 #include "BuildingGenerator.h"
+#include "BakeableBuilding.h"
 
 #include "OsmBuidingImporter.h"
 #include "Algo/Reverse.h"
@@ -8,7 +9,6 @@
 #include "OSMUserData/OSMUserData.h"
 #include "RuleAttributes.h"
 #include "RulePackage.h"
-#include "VitruvioActor.h"
 #include "VitruvioComponent.h"
 
 DEFINE_LOG_CATEGORY(LogBuildingGenerator);
@@ -87,33 +87,29 @@ bool BuildingGeneratorInternal::ApplyNumericRuleAttributes(UVitruvioComponent* C
 bool BuildingGeneratorInternal::ApplyHighDetailRuleAttribute(UVitruvioComponent* Component)
 {
 	if (!IsValid(Component)) return false;
-	// Annotation classes are reflected but not exported by the Vitruvio module.
+	// The annotation type is reflected but not exported by Vitruvio.
 	const UClass* EnumClass = FindObject<UClass>(nullptr, TEXT("/Script/Vitruvio.StringEnumAnnotation"));
 	if (!EnumClass) return false;
 	bool bApplied = false;
-	// Imported rules can expose multiple attributes with this displayed name.
 	for (const auto& [Key, Attribute] : Component->GetAttributes())
 	{
 		if (!Attribute || (Key != TEXT("Level_of_Detail") && Attribute->DisplayName != TEXT("Level_of_Detail"))) continue;
-		UStringAttribute* Detail = Cast<UStringAttribute>(Attribute);
-		if (!Detail) continue;
-		UAttributeAnnotation* Annotation = Detail->GetAnnotation();
+		if (!Cast<UStringAttribute>(Attribute)) continue;
+		UAttributeAnnotation* Annotation = Attribute->GetAnnotation();
 		if (!Annotation || !Annotation->IsA(EnumClass)) continue;
 		for (const FString& Option : static_cast<UStringEnumAnnotation*>(Annotation)->Values)
 		{
-			if (Option.Equals(TEXT("high"), ESearchCase::IgnoreCase))
-			{
-				Component->SetStringAttribute(Key, Option, false, false);
-				bApplied = true;
-				break;
-			}
+			if (!Option.Equals(TEXT("high"), ESearchCase::IgnoreCase)) continue;
+			Component->SetStringAttribute(Key, Option, false, false);
+			bApplied = true;
+			break;
 		}
 	}
 	return bApplied;
 }
 
 void UBuildingRuleAttributeApplier::Initialize(UVitruvioComponent* Component, const TMap<FString, double>& Values,
-                                               const bool bGenerateModel)
+	const bool bGenerateModel)
 {
 	Target = Component;
 	Overrides = Values;
@@ -128,7 +124,6 @@ void UBuildingRuleAttributeApplier::OnAttributesReady()
 		Target->OnAttributesEvaluated.RemoveDynamic(this, &UBuildingRuleAttributeApplier::OnAttributesReady);
 		if (BuildingGeneratorInternal::ApplyNumericRuleAttributes(Target, Overrides))
 		{
-			BuildingGeneratorInternal::ApplyHighDetailRuleAttribute(Target);
 			Target->GenerateAutomatically = true;
 			Target->EvaluateRuleAttributes(bGenerateAfterApply);
 		}
@@ -219,20 +214,18 @@ bool ABuildingGenerator::GenerateBuilding(const FImportedBuilding& Source, const
 	// Vitruvio expects clockwise initial shapes.
 	if (Area > 0) Algo::Reverse(Points);
 	for (int32 Index = 0; Index < Points.Num(); ++Index) Points[Index].InputKey = Index;
-	AVitruvioActor* Building = GetWorld()->SpawnActor<AVitruvioActor>(Origin, FRotator::ZeroRotator);
+	ABakeableBuilding* Building = GetWorld()->SpawnActor<ABakeableBuilding>(Origin, FRotator::ZeroRotator);
 	if (!Building) return false;
 	Building->SetFlags(RF_Transactional);
-	Building->VitruvioComponent->GenerateAutomatically = false;
-	Building->VitruvioComponent->SetSplineInitialShape(Points, false, false);
 	TMap<FString, double> Overrides;
 	if (!FloorHeightAttribute.IsEmpty()) Overrides.Add(FloorHeightAttribute, Height.FloorHeightMeters * RuleUnitsPerMeter);
 	if (!BuildingHeightAttribute.IsEmpty()) Overrides.Add(BuildingHeightAttribute, Height.BuildingHeightMeters * RuleUnitsPerMeter);
 	if (!FloorCountAttribute.IsEmpty()) Overrides.Add(FloorCountAttribute, Height.FloorCount);
-	UBuildingRuleAttributeApplier* Applier = NewObject<UBuildingRuleAttributeApplier>(Building);
-	Building->AddInstanceComponent(Applier);
-	Applier->RegisterComponent();
-	Applier->Initialize(Building->VitruvioComponent, Overrides);
-	Building->VitruvioComponent->SetRpk(RulePackage, true, false);
+	if (!Building->InitializeBuilding(RulePackage, Points, Overrides, bHighDetail))
+	{
+		Building->Destroy();
+		return false;
+	}
 	GeneratedActors.Add(Building);
 	UOSMUserData* Metadata = NewObject<UOSMUserData>(Building->GetRootComponent());
 	Metadata->Fields = Source.Tags;

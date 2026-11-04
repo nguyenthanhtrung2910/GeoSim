@@ -10,6 +10,7 @@ class AOsmRoadScene;
 class URoadStyle;
 class ALandscape;
 class ALandscapeSplineActor;
+class ARoadActor;
 struct FImportedRoadWay;
 
 /** One exact OSM tag/value exclusion. Repeated tags allow excluding multiple values. */
@@ -180,6 +181,68 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Deform", meta = (DisplayName = "Roadbed Height Offset", Units = "cm"))
 	double LandscapeHeightOffsetCm = 0.0;
 
+	/** Settings are copied to generated roads only by Create / Update Terrain Foliage Exclusion. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Foliage Exclusion", meta = (DisplayName = "Sample Spacing", ClampMin = "100", Units = "cm"))
+	double FoliageExclusionSampleSpacing = 500.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Foliage Exclusion", meta = (DisplayName = "Left Extra Width", ClampMin = "0", Units = "cm"))
+	double FoliageExclusionLeftExtraWidth = 0.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Foliage Exclusion", meta = (DisplayName = "Right Extra Width", ClampMin = "0", Units = "cm"))
+	double FoliageExclusionRightExtraWidth = 0.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Foliage Exclusion", meta = (DisplayName = "Shoulder Padding", ClampMin = "0", Units = "cm"))
+	double FoliageExclusionShoulderPadding = 0.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Foliage Exclusion", meta = (DisplayName = "Falloff Distance", ClampMin = "0", Units = "cm"))
+	double FoliageExclusionFalloffDistance = 0.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Foliage Exclusion", meta = (DisplayName = "Core Width Scale", ClampMin = "0.1", ClampMax = "4"))
+	double FoliageExclusionCoreWidthScale = 1.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Foliage Exclusion", meta = (DisplayName = "Falloff Scale", ClampMin = "0", ClampMax = "4"))
+	double FoliageExclusionFalloffScale = 1.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Foliage Exclusion", meta = (DisplayName = "Target Landscape Layer", GetOptions = "GetFoliageLandscapeLayerOptions"))
+	FName FoliageExclusionTargetLandscapeLayer = NAME_None;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Foliage Exclusion", meta = (DisplayName = "Target Landscape Edit Layer", GetOptions = "GetFoliageLandscapeEditLayerOptions"))
+	FName FoliageExclusionTargetLandscapeEditLayer = NAME_None;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Foliage Exclusion", meta = (DisplayName = "Target PCG Exclusion Tag"))
+	FName FoliageExclusionTargetPCGTag = TEXT("RoadExclusion");
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Foliage Exclusion", meta = (DisplayName = "PCG Side Falloff", ClampMin = "0", Units = "cm"))
+	double FoliageExclusionPCGSideFalloff = 0.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Foliage Exclusion", meta = (DisplayName = "Show PCG Bounds Debug"))
+	bool bShowFoliageExclusionPCGDebugBounds = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Foliage Exclusion", meta = (DisplayName = "Affects Landscape Grass"))
+	bool bFoliageExclusionAffectsLandscapeGrass = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Foliage Exclusion", meta = (DisplayName = "Affects Procedural Foliage"))
+	bool bFoliageExclusionAffectsProceduralFoliage = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Foliage Exclusion", meta = (DisplayName = "Affects PCG"))
+	bool bFoliageExclusionAffectsPCG = true;
+
+	/** Enables the plugin's optional reapply behavior when individual roads are subsequently edited. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Foliage Exclusion", meta = (DisplayName = "Auto Reapply On Road Edit"))
+	bool bAutoReapplyFoliageExclusionOnRoadEdit = false;
+
+	UFUNCTION(CallInEditor, Category = "Terrain Foliage Exclusion", meta = (DisplayName = "Create / Update Terrain Foliage Exclusion"))
+	void CreateFoliageExclusion();
+
+	UFUNCTION(CallInEditor, Category = "Terrain Foliage Exclusion", meta = (DisplayName = "Clear Foliage Exclusion"))
+	void ClearFoliageExclusion();
+
+	UFUNCTION()
+	TArray<FString> GetFoliageLandscapeLayerOptions() const;
+
+	UFUNCTION()
+	TArray<FString> GetFoliageLandscapeEditLayerOptions() const;
+
 	UFUNCTION(CallInEditor, Category = "Road Constructor")
 	void GenerateRoads();
 
@@ -187,7 +250,7 @@ public:
 	void ClearRoads();
 
 	/** Replace this generator's Landscape deformation splines using its currently generated roads. */
-	UFUNCTION(CallInEditor, Category = "Terrain Deform")
+	UFUNCTION(CallInEditor, Category = "Terrain Deform", meta = (DisplayName = "Create / Update Landscape Spline Deform"))
 	void GenerateLandscapeSplines();
 
 	/** Remove only this generator's Landscape splines and their deformation, preserving roads. */
@@ -221,6 +284,12 @@ private:
 	friend class FRoadGeneratorScenePartitionTest;
 	friend class FRoadGeneratorSharedNodeTest;
 	friend class FRoadGeneratorTagExclusionTest;
+	friend class FRoadGeneratorFoliageExclusionTest;
+
+	TArray<ARoadActor*> GetFoliageExclusionRoads() const;
+#if WITH_EDITOR
+	void CopyFoliageExclusionSettings(ARoadActor* Road) const;
+#endif
 
 	bool bGenerationInProgress = false;
 	UPROPERTY()

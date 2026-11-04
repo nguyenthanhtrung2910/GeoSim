@@ -11,6 +11,6 @@ public class BuildingGeneration : ModuleRules
 		PrivateDependencyModuleNames.AddRange([
 			"XmlParser", "OSMUserData", "Coordinates", "Landscape", "GDALInterface", "LandscapeUtils", "SplineImporter", "ConcurrencyHelpers"
 		]);
-		if (target.bBuildEditor) PrivateDependencyModuleNames.Add("UnrealEd");
+		if (target.bBuildEditor) PrivateDependencyModuleNames.AddRange(["UnrealEd", "AssetTools", "AssetRegistry", "MeshDescription", "StaticMeshDescription"]);
 	}
 }

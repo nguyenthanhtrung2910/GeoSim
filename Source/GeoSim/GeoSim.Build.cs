@@ -20,7 +20,7 @@ public class GeoSim : ModuleRules
 
         if (!Target.bBuildEditor) return;
         PrivateDependencyModuleNames.Add("UnrealEd");
-        PrivateDependencyModuleNames.Add("PropertyEditor");
+		PrivateDependencyModuleNames.Add("BSPUtils");
 
         // Uncomment if you are using Slate UI
         // PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });

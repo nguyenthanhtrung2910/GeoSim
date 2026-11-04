@@ -56,7 +56,7 @@ private:
 	void OnAttributesReady();
 };
 
-/** Generates standard Vitruvio actors from the importer cache; never downloads or imports source data. */
+/** Generates editable buildings with Bake and Unbake support from the importer cache. */
 UCLASS(Blueprintable)
 class BUILDINGGENERATION_API ABuildingGenerator : public AActor
 {
@@ -76,6 +76,9 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Buildings|Vitruvio")
 	TObjectPtr<URulePackage> RulePackage;
+	/** Sets supported Level_of_Detail enum attributes to high on newly generated buildings. Off keeps package defaults. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Buildings|Vitruvio")
+	bool bHighDetail = false;
 	/** Full numeric key or unique displayed name in the assigned package. Empty skips this override. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Buildings|Vitruvio")
 	FString FloorHeightAttribute;
@@ -90,6 +93,7 @@ public:
 
 	UPROPERTY(VisibleInstanceOnly, Category = "Buildings|Output")
 	TArray<TSoftObjectPtr<AActor>> GeneratedActors;
+
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Buildings")
 	void GenerateBuildings();
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Buildings")

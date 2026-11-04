@@ -3,6 +3,7 @@
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 #include "BuildingGenerator.h"
 #include "Async/Async.h"
+#include "AssetCompilingManager.h"
 #include "Components/SplineComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/Engine.h"
@@ -15,7 +16,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "RulePackage.h"
-#include "VitruvioActor.h"
+#include "BakeableBuilding.h"
 #include "VitruvioComponent.h"
 #include "UObject/SoftObjectPath.h"
 
@@ -56,6 +57,8 @@ bool FOsmBuildingImporterLocalFileTest::RunTest(const FString& Parameters)
 	AOsmBuidingImporter* Importer = World->SpawnActor<AOsmBuidingImporter>();
 	AStaticMeshActor* Terrain = World->SpawnActor<AStaticMeshActor>();
 	Terrain->GetStaticMeshComponent()->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")));
+	FAssetCompilingManager::Get().FinishAllCompilation();
+	Terrain->GetStaticMeshComponent()->RecreatePhysicsState();
 	Terrain->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	Terrain->SetActorScale3D(FVector(10, 10, 1));
 	Terrain->SetActorLocation(FVector(0, 0, -50));
@@ -92,10 +95,10 @@ bool FOsmBuildingImporterLocalFileTest::RunTest(const FString& Parameters)
 			TestEqual(TEXT("Generator consumes cached record"), Generator->GeneratedActors.Num(), 1);
 			if (Generator->GeneratedActors.Num() == 1)
 			{
-				const AVitruvioActor* Building = Cast<AVitruvioActor>(Generator->GeneratedActors[0].Get());
-				if (TestNotNull(TEXT("Generator creates a standard Vitruvio actor"), Building))
+				const ABakeableBuilding* Building = Cast<ABakeableBuilding>(Generator->GeneratedActors[0].Get());
+				if (TestNotNull(TEXT("Generator creates a building with Bake and Unbake controls"), Building))
 				{
-					TestTrue(TEXT("Generator uses the normal Vitruvio class"), Building->GetClass() == AVitruvioActor::StaticClass());
+					TestNotNull(TEXT("New building starts a Vitruvio editing session"), Building->VitruvioComponent.Get());
 					const USplineComponent* Spline = Building->FindComponentByClass<USplineComponent>();
 					if (TestNotNull(TEXT("Vitruvio actor receives the cached footprint"), Spline))
 						TestTrue(TEXT("Generated spline is closed"), Spline->IsClosedLoop());

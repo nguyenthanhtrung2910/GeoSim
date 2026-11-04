@@ -287,6 +287,27 @@ generator; ways are selected by **Highway Filter** and **Excluded Road Tags**.
 The shared road cache now belongs to OSMRoadImporter. SplineImporter and the building
 import workflow remain independent of road generation.
 
+## Terrain foliage exclusion
+
+Road Generator exposes the native RoadActor settings under **Terrain Foliage Exclusion**,
+with **Create / Update Terrain Foliage Exclusion** and **Clear Foliage Exclusion** buttons.
+There is no separate Enable checkbox; Create enables the native feature on the roads.
+**Affects PCG** defaults to enabled and **Target PCG Exclusion Tag** defaults to
+`RoadExclusion`. The landscape layer selectors use the plugin's available options
+once generated roads exist.
+
+Settings remain pending on the generator until Create / Update is pressed. That button
+copies all foliage settings to roads and connector roads across every generated scene,
+then runs the native foliage exclusion operation. It does not rebuild road geometry.
+Clear removes this generator's road contributions using the last applied road settings,
+so changing the generator's pending layer names does not change what Clear targets.
+Other generators' road corridors are preserved. Normal foliage/PCG regeneration may
+still be needed to refresh downstream output after changing exclusion corridors.
+
+**Auto Reapply On Road Edit** defaults to disabled. If explicitly enabled and applied,
+it activates the plugin's native behavior for subsequent individual road edits; editing
+the generator's fields still does not apply pending exclusion settings automatically.
+
 ## Verification
 
 Editor automation tests: `Landscapes.RoadConstructor`.

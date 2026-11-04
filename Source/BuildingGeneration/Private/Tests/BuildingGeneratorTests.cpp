@@ -15,6 +15,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBuildingLegacyRedirectTest, "GeoSim.BuildingGe
 
 bool FBuildingLegacyRedirectTest::RunTest(const FString& Parameters)
 {
+	TestFalse(TEXT("Plugin Nanite generation is opt-in for ordinary Vitruvio components"), GetDefault<UVitruvioComponent>()->bEnableNanite);
 	for (const TCHAR* OldName : { TEXT("/Script/GeoSim.VitruvioBuildingsFromSplines"), TEXT("/Script/Landscapes.VitruvioBuildingsFromSplines") })
 	{
 		FSoftObjectPath Path(OldName);
@@ -25,10 +26,10 @@ bool FBuildingLegacyRedirectTest::RunTest(const FString& Parameters)
 	TestNull(TEXT("PCG graph option has been removed"), FindFProperty<FProperty>(ABuildingGenerator::StaticClass(), TEXT("PCGGraph")));
 	FSoftObjectPath OldActor(TEXT("/Script/BuildingGeneration.PersistentBuildingActor"));
 	TestTrue(TEXT("Removed persistent actor is redirected"), OldActor.FixupCoreRedirects());
-	TestEqual(TEXT("Saved persistent actor class resolves to standard Vitruvio"), OldActor.TryLoad(), static_cast<UObject*>(AVitruvioActor::StaticClass()));
+	TestEqual(TEXT("Saved actor class resolves to standard Vitruvio"), OldActor.TryLoad(), static_cast<UObject*>(AVitruvioActor::StaticClass()));
 	FSoftObjectPath OldComponent(TEXT("/Script/BuildingGeneration.PersistentVitruvioComponent"));
 	TestTrue(TEXT("Removed persistent component is redirected"), OldComponent.FixupCoreRedirects());
-	TestEqual(TEXT("Saved persistent component class resolves to standard Vitruvio"), OldComponent.TryLoad(), static_cast<UObject*>(UVitruvioComponent::StaticClass()));
+	TestEqual(TEXT("Saved component class resolves to standard Vitruvio"), OldComponent.TryLoad(), static_cast<UObject*>(UVitruvioComponent::StaticClass()));
 	return true;
 }
 
@@ -112,25 +113,25 @@ bool FBuildingRuleMappingTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Ambiguous short names are rejected"), BuildingGeneratorInternal::ApplyNumericRuleAttributes(Component, Overrides));
 	Overrides = {{TEXT("rules.floorHeight"), 3.6}};
 	TestTrue(TEXT("Full keys resolve ambiguity"), BuildingGeneratorInternal::ApplyNumericRuleAttributes(Component, Overrides));
-	TestFalse(TEXT("Missing detail attribute is optional"), BuildingGeneratorInternal::ApplyHighDetailRuleAttribute(Component));
-	UStringAttribute* Detail = NewObject<UStringAttribute>(Component);
-	Detail->DisplayName = TEXT("Level_of_Detail");
-	Detail->Value = TEXT("Low");
-	Attributes.Add(TEXT("Default$Level_of_Detail"), Detail);
-	TestFalse(TEXT("Plain strings are not treated as dropdowns"), BuildingGeneratorInternal::ApplyHighDetailRuleAttribute(Component));
-	UClass* EnumClass = FindObject<UClass>(nullptr, TEXT("/Script/Vitruvio.StringEnumAnnotation"));
-	if (TestNotNull(TEXT("Vitruvio string enum annotation class"), EnumClass))
+	const UClass* EnumClass = FindObject<UClass>(nullptr, TEXT("/Script/Vitruvio.StringEnumAnnotation"));
+	if (TestNotNull(TEXT("Vitruvio enum annotation is reflected"), EnumClass))
 	{
+		UStringAttribute* Detail = NewObject<UStringAttribute>(Component);
+		Detail->DisplayName = TEXT("Level_of_Detail");
+		Detail->Value = TEXT("low");
+		Attributes.Add(TEXT("rules.detail"), Detail);
+		TestFalse(TEXT("Plain strings are not treated as detail enums"), BuildingGeneratorInternal::ApplyHighDetailRuleAttribute(Component));
 		auto* Annotation = static_cast<UStringEnumAnnotation*>(NewObject<UObject>(Detail, EnumClass));
-		Annotation->Values = {TEXT("Low"), TEXT("High")};
+		Annotation->Values = {TEXT("low"), TEXT("HIGH")};
 		Detail->SetAnnotation(Annotation);
-		TestTrue(TEXT("Imported dropdown resolves by displayed name"), BuildingGeneratorInternal::ApplyHighDetailRuleAttribute(Component));
-		TestEqual(TEXT("Exact package option spelling is used"), Detail->Value, FString(TEXT("High")));
-		TestTrue(TEXT("Detail remains a user override"), Detail->bUserSet);
-		Annotation->Values = {TEXT("Medium"), TEXT("Low")};
-		Detail->Value = TEXT("Low");
-		TestFalse(TEXT("Dropdown without high keeps its value"), BuildingGeneratorInternal::ApplyHighDetailRuleAttribute(Component));
-		TestEqual(TEXT("Unsupported dropdown unchanged"), Detail->Value, FString(TEXT("Low")));
+		TestTrue(TEXT("High detail resolves the displayed name and enum option"), BuildingGeneratorInternal::ApplyHighDetailRuleAttribute(Component));
+		TestEqual(TEXT("Uses the exact enum spelling"), Detail->Value, FString(TEXT("HIGH")));
+		TestTrue(TEXT("High detail becomes a saved user override"), Detail->bUserSet);
+		Annotation->Values = {TEXT("low"), TEXT("medium")};
+		Detail->Value = TEXT("low");
+		Detail->bUserSet = false;
+		TestFalse(TEXT("Unsupported detail enum keeps defaults"), BuildingGeneratorInternal::ApplyHighDetailRuleAttribute(Component));
+		TestFalse(TEXT("Unsupported detail is not overridden"), Detail->bUserSet);
 	}
 	World->DestroyWorld(false);
 	return true;
@@ -140,9 +141,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBuildingEvaluatedRuleMappingTest, "GeoSim.Buil
 
 bool FBuildingEvaluatedRuleMappingTest::RunTest(const FString& Parameters)
 {
-	for (const bool bTestDetail : {false, true})
+	for (const bool bTestDefaults : {false, true})
 	{
-		URulePackage* Package = LoadObject<URulePackage>(nullptr, bTestDetail
+		URulePackage* Package = LoadObject<URulePackage>(nullptr, bTestDefaults
 			? TEXT("/Game/ErsiRulePackages/Paris_2014.Paris_2014")
 			: TEXT("/Game/ErsiRulePackages/BuildingTextures.BuildingTextures"));
 		if (!TestNotNull(TEXT("Real rule package"), Package)) return false;
@@ -168,31 +169,24 @@ bool FBuildingEvaluatedRuleMappingTest::RunTest(const FString& Parameters)
 		Actor->AddInstanceComponent(Applier);
 		Applier->RegisterComponent();
 		// Evaluate real CGA attributes and reevaluate overrides; omit mesh rendering under NullRHI.
-		const TMap<FString, double> Values = bTestDetail ? TMap<FString, double>()
+		const TMap<FString, double> Values = bTestDefaults ? TMap<FString, double>()
 			: TMap<FString, double>{{TEXT("Floor_Height"), 3.4}, {TEXT("Eave_Height"), 34}};
 		Applier->Initialize(Component, Values, false);
 		Component->SetRpk(Package, true, false);
 		const double Deadline = FPlatformTime::Seconds() + 45;
 		const TWeakObjectPtr<UBuildingRuleAttributeApplier> WeakApplier(Applier);
-		ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([this, World, Component, WeakApplier, Values, Deadline, bTestDetail]()
+		ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([this, World, Component, WeakApplier, Values, Deadline]()
 		{
 			Component->TickComponent(0, LEVELTICK_All, nullptr);
 			if ((!Component->GetAttributesReady() || (WeakApplier.IsValid() && WeakApplier->IsRegistered())) && FPlatformTime::Seconds() < Deadline)
 				return false;
 			TestTrue(TEXT("Attribute evaluation completed"), Component->GetAttributesReady());
 			TestTrue(TEXT("Auto Generate is enabled only after successful override application"), Component->GenerateAutomatically);
-			bool bFoundDetail = false;
 			for (const auto& [Key, Attribute] : Component->GetAttributes())
 			{
-				if (Attribute->DisplayName != TEXT("Level_of_Detail")) continue;
-				if (const UStringAttribute* Detail = Cast<UStringAttribute>(Attribute))
-				{
-					TestTrue(TEXT("High detail survives rule reevaluation"), Detail->Value.Equals(TEXT("high"), ESearchCase::IgnoreCase));
-					TestTrue(TEXT("Detail override remains user-set"), Detail->bUserSet);
-					bFoundDetail = true;
-				}
+				if (Values.Contains(Key) || Values.Contains(Attribute->DisplayName)) continue;
+				TestFalse(FString::Printf(TEXT("Unmapped parameter %s retains rule defaults"), *Key), Attribute->bUserSet);
 			}
-			if (bTestDetail) TestTrue(TEXT("Paris package exposes detail dropdown"), bFoundDetail);
 			for (const auto& [Name, Expected] : Values)
 			{
 				bool bFound = false;
