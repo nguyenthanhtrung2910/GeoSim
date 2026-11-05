@@ -8,14 +8,14 @@ public class LandscapeGeneration : ModuleRules
 		CppStandard = CppStandardVersion.Cpp20;
 		PublicDependencyModuleNames.AddRange([
 			"Core", "CoreUObject", "Engine", "LandscapeCombinator", "ImageDownloader",
-			"Landscape", "Coordinates", "LCCommon", "ConcurrencyHelpers", "HeightmapModifier", "ConsoleHelpers"
+			"Landscape", "Coordinates", "LCCommon", "ConcurrencyHelpers", "HeightmapModifier", "ConsoleHelpers", "PCG"
 		]);
 		PrivateDependencyModuleNames.AddRange([
 			"GDALInterface", "FileDownloader", "Projects", "GeometryCore", "MapboxHelpers", "LandscapeUtils", "SlateCore"
 		]);
 		if (target.bBuildEditor)
 		{
-			PrivateDependencyModuleNames.AddRange(["UnrealEd", "EditorFramework", "LandscapeEditor"]);
+			PrivateDependencyModuleNames.AddRange(["UnrealEd", "EditorFramework", "LandscapeEditor", "BSPUtils"]);
 		}
 	}
 }

@@ -2,14 +2,16 @@
 
 #pragma once
 
-class USceneCaptureComponent2D;
-class UMaterial;
-
 #include "CoreMinimal.h"
+#include "Async/AsyncWork.h"
 #include "IImageWrapper.h" // Include the header that defines ERGBFormat
 #include "GameFramework/Actor.h"
+#include "RHIGPUReadback.h"
+#include "RenderCommandFence.h"
 #include "FrameCaptureManager.generated.h"
 
+class USceneCaptureComponent2D;
+class UMaterial;
 
 UENUM(BlueprintType)
 enum class ECustomImageFormat : uint8
@@ -45,7 +47,7 @@ struct FRenderRequestStruct{
 
 
 UCLASS()
-class GEOSIM_API AFrameCaptureManager : public AActor
+class COMPUTERVISION_API AFrameCaptureManager : public AActor
 {
 	GENERATED_BODY()
 	

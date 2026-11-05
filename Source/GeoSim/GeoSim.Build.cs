@@ -9,7 +9,7 @@ public class GeoSim : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
-		PublicDependencyModuleNames.AddRange(["Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "PCG", "ImageWrapper", "RenderCore", "Renderer", "RHI", "UMG"]);
+		PublicDependencyModuleNames.AddRange(["Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "ImageWrapper", "RenderCore", "Renderer", "RHI", "UMG"]);
         PublicDependencyModuleNames.Add("LCCommon");
         //PrivateDependencyModuleNames.AddRange(["ArcGISMapsSDK", "GeoReferencing", "Landscape", "SplineImporter", "Coordinates", "GDALInterface", "LCCommon", "ConcurrencyHelpers", "OSMUserData", "Vitruvio", "ImageCore"]);
         PrivateDependencyModuleNames.AddRange(["GeoReferencing", "Landscape", "SplineImporter", "Coordinates", "GDALInterface", "ConcurrencyHelpers", "OSMUserData", "ImageCore"]);
@@ -20,7 +20,6 @@ public class GeoSim : ModuleRules
 
         if (!Target.bBuildEditor) return;
         PrivateDependencyModuleNames.Add("UnrealEd");
-		PrivateDependencyModuleNames.Add("BSPUtils");
 
         // Uncomment if you are using Slate UI
         // PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });

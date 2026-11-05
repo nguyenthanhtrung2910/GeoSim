@@ -2,6 +2,7 @@
 #include "FrameCaptureManager.h"
 
 #include "Components/SceneCaptureComponent2D.h"
+#include "Engine/Engine.h"
 #include "ShowFlags.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Materials/Material.h"
@@ -10,6 +11,7 @@
 #include "IImageWrapperModule.h"
 #include "Modules/ModuleManager.h"
 #include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 
 // Sets default values
 AFrameCaptureManager::AFrameCaptureManager()

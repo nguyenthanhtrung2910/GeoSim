@@ -8,7 +8,7 @@ class ALandscapeProxy;
 
 /** A native PCG volume whose brush can be fitted to a landscape with an editor button. */
 UCLASS(BlueprintType, DisplayName = "Landscape Bounds PCG Volume")
-class GEOSIM_API ALandscapeBoundsPCGVolume : public APCGVolume
+class LANDSCAPEGENERATION_API ALandscapeBoundsPCGVolume : public APCGVolume
 {
 	GENERATED_BODY()
 

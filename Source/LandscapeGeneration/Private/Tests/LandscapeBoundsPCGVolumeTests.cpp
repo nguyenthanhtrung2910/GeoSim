@@ -9,6 +9,24 @@
 #include "LandscapeInfo.h"
 #include "Misc/AutomationTest.h"
 #include "PCGComponent.h"
+#include "UObject/SoftObjectPath.h"
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FLandscapePCGVolumeRedirectTest,
+	"GeoSim.ModuleRedirects.LandscapeBoundsPCGVolume", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FLandscapePCGVolumeRedirectTest::RunTest(const FString& Parameters)
+{
+	for (const TCHAR* OldModule : {TEXT("GeoSim"), TEXT("Landscapes")})
+	{
+		FSoftClassPath Path(FString::Printf(TEXT("/Script/%s.LandscapeBoundsPCGVolume"), OldModule));
+		TestTrue(TEXT("Saved PCG volume class is redirected"), Path.FixupCoreRedirects());
+		TestEqual(TEXT("PCG volume resolves to LandscapeGeneration"),
+			Path.ToString(), ALandscapeBoundsPCGVolume::StaticClass()->GetPathName());
+		TestEqual(TEXT("Saved PCG volume class can be loaded"),
+			Path.TryLoadClass<AActor>(), ALandscapeBoundsPCGVolume::StaticClass());
+	}
+	return true;
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FLandscapePCGVolumeBoundsTest,
 	"GeoSim.PCG.LandscapeVolumeBounds", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
